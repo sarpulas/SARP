@@ -124,6 +124,8 @@ jobs:
           Binaries for linux (x86_64, aarch64), macOS (x86_64, aarch64) and Windows (x86_64).
           Each archive contains a single \`ruff\` executable plus a \`.sha256\` checksum.
 
-          Options are documented in \`python/docs/compact-options.md\`; all of them default to
-          standard Black/PEP 8 behaviour, so an unconfigured build formats as upstream does." \
+          Options are documented in \`python/docs/compact-options.md\`, together with the standard
+          profile that new code is held to. Each option defaults to upstream behaviour so that an
+          existing codebase can adopt the tooling without one reformatting commit touching every
+          file, and turn the style on a directory at a time." \
             dist/*
