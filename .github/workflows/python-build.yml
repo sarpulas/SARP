@@ -1,0 +1,59 @@
+# Verify the compact patches still apply to the pinned upstream release, and that the
+# resulting ruff behaves. Runs on any change under python/.
+#
+# The single most important assertion here is that `git am` succeeds. When upstream moves
+# something the patches depend on, this job goes red — that is the early warning this repo
+# exists to provide.
+name: python — build and verify
+
+on:
+  push:
+    paths: ["python/**", ".github/workflows/python-build.yml"]
+  pull_request:
+    paths: ["python/**", ".github/workflows/python-build.yml"]
+  workflow_dispatch:
+  schedule:
+    # Weekly, so a broken apply surfaces even when nobody has touched this repo.
+    - cron: "0 6 * * 1"
+
+permissions: {}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python/build/ruff
+
+      - name: Apply patches and build
+        run: PROFILE=debug python/scripts/build.sh
+
+      - name: Upstream test suites
+        working-directory: python/build/ruff
+        run: |
+          cargo test -p ruff_linter --lib
+          cargo test -p ruff_python_formatter
+
+      - name: Generated files are in sync
+        working-directory: python/build/ruff
+        run: |
+          cargo dev generate-all
+          git diff --exit-code
+
+      - name: Convergence
+        run: |
+          # format -> check --fix -> format must reach a fixed point, or `ruff format`
+          # and `ruff check` disagree forever on compact output.
+          python/scripts/check-convergence.sh python/build/ruff/target/debug/ruff | tee out.txt
+          grep -q "FIXED POINT reached" out.txt

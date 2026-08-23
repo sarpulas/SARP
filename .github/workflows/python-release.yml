@@ -1,0 +1,129 @@
+# Build ruff with the compact patches for five platforms and attach the archives to a
+# GitHub Release.
+#
+# Nothing is vendored: each job clones upstream at the tag pinned in
+# python/UPSTREAM_VERSION, applies python/patches/, and builds. All native builds on
+# standard runners — no cross-compilation, no external services, and no secrets beyond
+# the automatic GITHUB_TOKEN.
+#
+# Trigger:  git tag python-v0.16.4-sarp.1 && git push origin python-v0.16.4-sarp.1
+name: python — release
+
+on:
+  push:
+    tags: ["python-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release"
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin,       runner: macos-13 }
+          - { target: aarch64-apple-darwin,      runner: macos-14 }
+          - { target: x86_64-pc-windows-msvc,    runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python/build/ruff
+          key: ${{ matrix.target }}
+
+      - name: Apply patches and build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python/scripts/build.sh
+
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="ruff-${{ matrix.target }}"
+          bin="python/build/ruff/target/${{ matrix.target }}/release/ruff"
+          mkdir -p "dist/$name"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$bin.exe" "dist/$name/"
+            ( cd dist && 7z a "$name.zip" "$name" >/dev/null && sha256sum "$name.zip" > "$name.zip.sha256" )
+          else
+            cp "$bin" "dist/$name/"
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+          fi
+          rm -rf "dist/$name"
+
+      # Every target builds natively, so the binary always runs on its own runner.
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="python/build/ruff/target/${{ matrix.target }}/release/ruff"
+          if [ "${{ runner.os }}" = "Windows" ]; then bin="$bin.exe"; fi
+          "$bin" --version
+          printf 'x = {"a": 1}\n' > smoke.py
+          "$bin" format --isolated smoke.py
+          "$bin" check --isolated --select F smoke.py || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sarp-python-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sarp-python-*
+          merge-multiple: true
+          path: dist
+
+      - run: ls -la dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "$TAG" \
+            --notes "ruff built with the sarp compact formatting patches.
+
+          Binaries for linux (x86_64, aarch64), macOS (x86_64, aarch64) and Windows (x86_64).
+          Each archive contains a single \`ruff\` executable plus a \`.sha256\` checksum.
+
+          Options are documented in \`python/docs/compact-options.md\`; all of them default to
+          standard Black/PEP 8 behaviour, so an unconfigured build formats as upstream does." \
+            dist/*

@@ -1,0 +1,1347 @@
+From 23bde56643c9cc88b247ef62f1cbc217d6654f2c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 23 Aug 2026 09:52:34 +0000
+Subject: [PATCH 2/2] sarp: linter compatibility for the compact options
+
+Without this, `ruff format` and `ruff check --fix` fight each other: the
+formatter emits compact output and pycodestyle, flake8-commas and isort
+immediately flag or undo it.
+
+Each option relaxes exactly the rules it contradicts, wired up in
+`ruff_workspace`'s fork-owned `compact` module:
+
+    annotation-spacing    E225 (->), E231 (annotation colons, including
+                          variable and class-attribute annotations)
+    operator-spacing      E225/E226/E227/E228, including division's own
+                          PEP 570 branch
+    dict-spacing          E231 in dict literals
+    default-value-spacing E251
+    import-trailing-comma COM812, and isort's own emitter
+    top-level-blank-lines E302/E303/E305 and isort's lines-after-imports
+    nested-blank-lines    E301/E306
+
+The isort part matters because I001 rewrites wrapped import blocks itself and
+appended a trailing comma unconditionally, so it kept restoring the comma the
+formatter had just removed. `emit_trailing_comma` (default true) suppresses it.
+
+E231's relaxation is deliberately narrow: it applies to annotation colons only.
+Compound statements (`if x:pass`), the soft keywords `match`/`case`/`type`, and
+lambdas all still report.
+---
+ .../ruff_linter/src/checkers/logical_lines.rs |   6 +-
+ crates/ruff_linter/src/checkers/tokens.rs     |   8 +-
+ .../flake8_commas/rules/trailing_commas.rs    |  27 ++-
+ crates/ruff_linter/src/rules/isort/format.rs  |  26 ++-
+ crates/ruff_linter/src/rules/isort/mod.rs     |   1 +
+ .../ruff_linter/src/rules/isort/settings.rs   |   7 +-
+ .../src/rules/pycodestyle/compact.rs          | 140 ++++++++++++
+ .../ruff_linter/src/rules/pycodestyle/mod.rs  |   1 +
+ .../rules/pycodestyle/rules/blank_lines.rs    |  24 +-
+ .../rules/logical_lines/missing_whitespace.rs |  59 ++++-
+ .../missing_whitespace_around_operator.rs     |  31 ++-
+ ...hitespace_around_named_parameter_equals.rs |  13 +-
+ .../src/rules/pycodestyle/settings.rs         |   6 +
+ crates/ruff_workspace/src/compact.rs          | 110 +++++++++
+ crates/ruff_workspace/src/configuration.rs    |  58 ++++-
+ crates/ruff_workspace/src/lib.rs              |   1 +
+ crates/ruff_workspace/src/options.rs          | 211 +++++++++++++++++-
+ crates/ruff_workspace/src/settings.rs         |  13 +-
+ 18 files changed, 699 insertions(+), 43 deletions(-)
+ create mode 100644 crates/ruff_linter/src/rules/pycodestyle/compact.rs
+ create mode 100644 crates/ruff_workspace/src/compact.rs
+
+diff --git a/crates/ruff_linter/src/checkers/logical_lines.rs b/crates/ruff_linter/src/checkers/logical_lines.rs
+index a3f8649e8f..b0719e43ad 100644
+--- a/crates/ruff_linter/src/checkers/logical_lines.rs
++++ b/crates/ruff_linter/src/checkers/logical_lines.rs
+@@ -106,15 +106,15 @@ pub(crate) fn check_logical_lines(
+             }
+ 
+             if enforce_whitespace_around_named_parameter_equals {
+-                whitespace_around_named_parameter_equals(&line, context);
++                whitespace_around_named_parameter_equals(&line, context, settings);
+             }
+ 
+             if enforce_missing_whitespace_around_operator {
+-                missing_whitespace_around_operator(&line, context);
++                missing_whitespace_around_operator(&line, context, settings);
+             }
+ 
+             if enforce_missing_whitespace {
+-                missing_whitespace(&line, context);
++                missing_whitespace(&line, context, settings);
+             }
+         }
+ 
+diff --git a/crates/ruff_linter/src/checkers/tokens.rs b/crates/ruff_linter/src/checkers/tokens.rs
+index e0c613b83a..554e870569 100644
+--- a/crates/ruff_linter/src/checkers/tokens.rs
++++ b/crates/ruff_linter/src/checkers/tokens.rs
+@@ -150,7 +150,13 @@ pub(crate) fn check_tokens(
+         Rule::TrailingCommaOnBareTuple,
+         Rule::ProhibitedTrailingComma,
+     ]) {
+-        flake8_commas::rules::trailing_commas(context, tokens, locator, indexer);
++        flake8_commas::rules::trailing_commas(
++            context,
++            tokens,
++            locator,
++            indexer,
++            context.settings(),
++        );
+     }
+ 
+     if context.is_rule_enabled(Rule::ExtraneousParentheses) {
+diff --git a/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs b/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs
+index be1b97bc58..6553056253 100644
+--- a/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs
++++ b/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs
+@@ -5,6 +5,7 @@ use ruff_text_size::{Ranged, TextRange};
+ 
+ use crate::Locator;
+ use crate::checkers::ast::LintContext;
++use crate::settings::LinterSettings;
+ use crate::{AlwaysFixableViolation, Violation};
+ use crate::{Edit, Fix};
+ 
+@@ -26,6 +27,7 @@ enum TokenType {
+     Lambda,
+     Class,
+     Type,
++    Import,
+     Irrelevant,
+ }
+ 
+@@ -75,8 +77,7 @@ impl From<(TokenKind, TextRange)> for SimpleToken {
+             TokenKind::Type => TokenType::Type,
+             TokenKind::For => TokenType::For,
+             TokenKind::Lambda => TokenType::Lambda,
+-            // Import treated like a function.
+-            TokenKind::Import => TokenType::Named,
++            TokenKind::Import => TokenType::Import,
+             _ => TokenType::Irrelevant,
+         };
+         #[expect(clippy::inconsistent_struct_constructor)]
+@@ -92,6 +93,8 @@ enum ContextType {
+     FunctionParameters,
+     /// Call argument-like item list, e.g. `f(1,2,3)`, `foo()(1,2,3)`.
+     CallArguments,
++    /// Import item list, e.g. `from x import (a, b, c)`.
++    Import,
+     /// Tuple-like item list, e.g. `(1,2,3)`.
+     Tuple,
+     /// Subscript item list, e.g. `x[1,2,3]`, `foo()[1,2,3]`.
+@@ -255,6 +258,7 @@ pub(crate) fn trailing_commas(
+     tokens: &Tokens,
+     locator: &Locator,
+     indexer: &Indexer,
++    settings: &LinterSettings,
+ ) {
+     let mut interpolated_strings = 0u32;
+     let simple_tokens = tokens.iter().filter_map(|token| {
+@@ -304,7 +308,15 @@ pub(crate) fn trailing_commas(
+         // Update the comma context stack.
+         let context = update_context(token, prev, prev_prev, &mut stack);
+ 
+-        check_token(token, prev, prev_prev, context, locator, lint_context);
++        check_token(
++            token,
++            prev,
++            prev_prev,
++            context,
++            locator,
++            lint_context,
++            settings,
++        );
+ 
+         // Pop the current context if the current token ended it.
+         // The top context is never popped (if unbalanced closing brackets).
+@@ -331,6 +343,7 @@ fn check_token(
+     context: Context,
+     locator: &Locator,
+     lint_context: &LintContext,
++    settings: &LinterSettings,
+ ) {
+     // Is it allowed to have a trailing comma before this token?
+     let comma_allowed = token.ty == TokenType::ClosingBracket
+@@ -338,6 +351,7 @@ fn check_token(
+             ContextType::No => false,
+             ContextType::FunctionParameters => true,
+             ContextType::CallArguments => true,
++            ContextType::Import => true,
+             ContextType::TypeParameters => true,
+             // `(1)` is not equivalent to `(1,)`.
+             ContextType::Tuple => context.num_commas != 0,
+@@ -398,7 +412,11 @@ fn check_token(
+                 | TokenType::OpeningSquareBracket
+                 | TokenType::OpeningCurlyBracket
+         );
+-    if comma_required {
++    if comma_required
++        // When import-trailing-comma = "never", skip COM812 for import statements.
++        && !(settings.pycodestyle.compact.import_trailing_comma_never
++            && context.ty == ContextType::Import)
++    {
+         if let Some(mut diagnostic) = lint_context
+             .report_diagnostic_if_enabled(MissingTrailingComma, TextRange::empty(prev_prev.end()))
+         {
+@@ -424,6 +442,7 @@ fn update_context(
+     let new_context = match token.ty {
+         TokenType::OpeningBracket => match (prev.ty, prev_prev.ty) {
+             (TokenType::Named, TokenType::Def) => Context::new(ContextType::FunctionParameters),
++            (TokenType::Import, _) => Context::new(ContextType::Import),
+             (TokenType::Named | TokenType::ClosingBracket, _) => {
+                 Context::new(ContextType::CallArguments)
+             }
+diff --git a/crates/ruff_linter/src/rules/isort/format.rs b/crates/ruff_linter/src/rules/isort/format.rs
+index 8cd811091c..b79b274226 100644
+--- a/crates/ruff_linter/src/rules/isort/format.rs
++++ b/crates/ruff_linter/src/rules/isort/format.rs
+@@ -44,6 +44,11 @@ pub(crate) fn format_import(
+ 
+ /// Add an import-from statement to the [`RopeBuilder`].
+ #[expect(clippy::too_many_arguments)]
++#[expect(
++    clippy::fn_params_excessive_bools,
++    reason = "fork adds `emit_trailing_comma`; bundling these into a struct would reshape an \
++              upstream signature and cost a conflict on every sync"
++)]
+ pub(crate) fn format_import_from(
+     import_from: &ImportFromData,
+     comments: &ImportFromCommentSet,
+@@ -54,6 +59,7 @@ pub(crate) fn format_import_from(
+     force_wrap_aliases: bool,
+     is_first: bool,
+     trailing_comma: bool,
++    emit_trailing_comma: bool,
+ ) -> String {
+     if aliases.len() == 1
+         && aliases
+@@ -101,7 +107,14 @@ pub(crate) fn format_import_from(
+         }
+     }
+ 
+-    format_multi_line(import_from, comments, aliases, is_first, stylist)
++    format_multi_line(
++        import_from,
++        comments,
++        aliases,
++        is_first,
++        stylist,
++        emit_trailing_comma,
++    )
+ }
+ 
+ /// Format an import-from statement in single-line format.
+@@ -201,6 +214,7 @@ fn format_multi_line(
+     aliases: &[(AliasData, ImportFromCommentSet)],
+     is_first: bool,
+     stylist: &Stylist,
++    emit_trailing_comma: bool,
+ ) -> String {
+     let mut output = String::with_capacity(CAPACITY);
+ 
+@@ -226,7 +240,8 @@ fn format_multi_line(
+     }
+     output.push_str(&stylist.line_ending());
+ 
+-    for (AliasData { name, asname, .. }, comments) in aliases {
++    let last_alias = aliases.len().saturating_sub(1);
++    for (index, (AliasData { name, asname, .. }, comments)) in aliases.iter().enumerate() {
+         for comment in &comments.atop {
+             output.push_str(stylist.indentation());
+             output.push_str(comment);
+@@ -240,7 +255,12 @@ fn format_multi_line(
+         } else {
+             output.push_str(name);
+         }
+-        output.push(',');
++        // Fork: `format.import-trailing-comma = "never"` suppresses the trailing comma on the
++        // final alias. Without this, I001's fix restores the comma that `ruff format` just
++        // removed, and the two oscillate. Separators between aliases are always emitted.
++        if emit_trailing_comma || index != last_alias {
++            output.push(',');
++        }
+ 
+         for comment in &comments.inline {
+             output.push(' ');
+diff --git a/crates/ruff_linter/src/rules/isort/mod.rs b/crates/ruff_linter/src/rules/isort/mod.rs
+index 40241ba98b..e6fe0371e3 100644
+--- a/crates/ruff_linter/src/rules/isort/mod.rs
++++ b/crates/ruff_linter/src/rules/isort/mod.rs
+@@ -289,6 +289,7 @@ fn format_import_block(
+                         is_first_statement,
+                         settings.split_on_trailing_comma
+                             && matches!(trailing_comma, TrailingComma::Present),
++                        settings.emit_trailing_comma,
+                     ));
+ 
+                     if settings.from_first {
+diff --git a/crates/ruff_linter/src/rules/isort/settings.rs b/crates/ruff_linter/src/rules/isort/settings.rs
+index b3ce23653f..4ec4f0a689 100644
+--- a/crates/ruff_linter/src/rules/isort/settings.rs
++++ b/crates/ruff_linter/src/rules/isort/settings.rs
+@@ -70,6 +70,9 @@ pub struct Settings {
+     pub from_first: bool,
+     pub length_sort: bool,
+     pub length_sort_straight: bool,
++    /// Fork-specific: when false, wrapped `from x import (...)` blocks are emitted
++    /// without a trailing comma, matching `format.import-trailing-comma = "never"`.
++    pub emit_trailing_comma: bool,
+ }
+ 
+ impl Settings {
+@@ -125,6 +128,7 @@ impl Default for Settings {
+             from_first: false,
+             length_sort: false,
+             length_sort_straight: false,
++            emit_trailing_comma: true,
+         }
+     }
+ }
+@@ -161,7 +165,8 @@ impl Display for Settings {
+                 self.no_sections,
+                 self.from_first,
+                 self.length_sort,
+-                self.length_sort_straight
++                self.length_sort_straight,
++                self.emit_trailing_comma,
+             ]
+         }
+         Ok(())
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/compact.rs b/crates/ruff_linter/src/rules/pycodestyle/compact.rs
+new file mode 100644
+index 0000000000..eb1523439f
+--- /dev/null
++++ b/crates/ruff_linter/src/rules/pycodestyle/compact.rs
+@@ -0,0 +1,140 @@
++//! Fork-owned pycodestyle settings that mirror the formatter's compact options.
++//!
++//! These have no upstream counterpart. They are populated in `ruff_workspace` from the
++//! `[format]` compact options so that pycodestyle rules stop flagging the formatter's own
++//! output — without them `ruff format` and `ruff check --fix` fight each other indefinitely.
++//!
++//! Holding them in their own struct keeps upstream's `pycodestyle::settings::Settings` to a
++//! single added field, and lets it keep deriving `Default` rather than needing a hand-written
++//! impl just to express the non-zero blank-line defaults.
++
++use std::fmt;
++
++use ruff_macros::CacheKey;
++use ruff_python_ast::token::TokenKind;
++
++use crate::display_settings;
++
++#[derive(Debug, Clone, CacheKey)]
++#[expect(
++    clippy::struct_excessive_bools,
++    reason = "each flag mirrors one independent formatter option"
++)]
++pub struct CompactSettings {
++    /// Expected blank lines between top-level definitions (default 2, set to 1 when
++    /// `format.top-level-blank-lines = "one"`). Consulted by E302/E303/E305.
++    pub top_level_blank_lines: u32,
++    /// Expected blank lines between nested definitions (default 1, set to 0 when
++    /// `format.nested-blank-lines = "zero"`). Consulted by E301/E306.
++    pub nested_blank_lines: u32,
++    /// When true, E225 allows missing spaces around high-precedence operators
++    /// (`*`, `/`, `//`, `%`, `**`, `@`). Set from `format.operator-spacing = "precedence"`.
++    pub operator_spacing_precedence: bool,
++    /// When true, E225 allows missing spaces around `->` and E231 allows missing space
++    /// after `:` in annotations. Set from `format.annotation-spacing = "compact"`.
++    pub annotation_spacing_compact: bool,
++    /// When true, E231 allows missing space after `:` in dict literals.
++    /// Set from `format.dict-spacing = "compact"`.
++    pub dict_spacing_compact: bool,
++    /// When true, E251 allows no spaces around `=` in annotated parameter defaults.
++    /// Set from `format.default-value-spacing = "compact"`.
++    pub default_value_spacing_compact: bool,
++    /// When true, COM812 does not flag missing trailing commas in import statements.
++    /// Set from `format.import-trailing-comma = "never"`.
++    pub import_trailing_comma_never: bool,
++}
++
++impl Default for CompactSettings {
++    fn default() -> Self {
++        Self {
++            // PEP 8 / Black defaults, so an unconfigured fork build lints as upstream does.
++            top_level_blank_lines: 2,
++            nested_blank_lines: 1,
++            operator_spacing_precedence: false,
++            annotation_spacing_compact: false,
++            dict_spacing_compact: false,
++            default_value_spacing_compact: false,
++            import_trailing_comma_never: false,
++        }
++    }
++}
++
++impl fmt::Display for CompactSettings {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        display_settings! {
++            formatter = f,
++            namespace = "linter.pycodestyle",
++            fields = [
++                self.top_level_blank_lines,
++                self.nested_blank_lines,
++                self.operator_spacing_precedence,
++                self.annotation_spacing_compact,
++                self.dict_spacing_compact,
++                self.default_value_spacing_compact,
++                self.import_trailing_comma_never,
++            ]
++        }
++        Ok(())
++    }
++}
++
++impl CompactSettings {
++    /// Whether `kind` is exempt from E225's "needs surrounding whitespace" requirement.
++    ///
++    /// Kept here rather than inline in `is_whitespace_needed` so that upstream's function
++    /// body gains a single guard call instead of a block of fork-specific branching.
++    pub fn exempts_whitespace(&self, kind: TokenKind) -> bool {
++        // `annotation-spacing = "compact"` writes `-> bool` as `->bool`.
++        if self.annotation_spacing_compact && kind == TokenKind::Rarrow {
++            return true;
++        }
++
++        // `*` and `**` are deliberately absent here: in this path the token may be a unary
++        // star (`*args`, `**kwargs`), where spacing is not the formatter's to relax. The
++        // binary case goes through `exempts_binary_whitespace` instead.
++        self.operator_spacing_precedence
++            && matches!(
++                kind,
++                TokenKind::Slash | TokenKind::DoubleSlash | TokenKind::Percent | TokenKind::At
++            )
++    }
++
++    /// Whether a bracket-free colon in a logical line beginning with `first` belongs to an
++    /// annotated assignment (`value:int = 3`, `self.attr:str = "x"`) rather than to a compound
++    /// statement (`if x:pass`, `for i in y:pass`).
++    ///
++    /// `annotation-spacing = "compact"` removes the space after annotation colons, so E231 has
++    /// to be relaxed for them — but only for them. Compound-statement colons are untouched by
++    /// the formatter and must keep reporting.
++    ///
++    /// Annotated assignments always start with a name; compound statements start with a
++    /// keyword. `match`, `case` and `type` are soft keywords that tokenise as names, so they
++    /// are excluded explicitly.
++    pub fn is_annotation_colon_line(&self, first: Option<TokenKind>, first_text: &str) -> bool {
++        self.annotation_spacing_compact
++            && first == Some(TokenKind::Name)
++            && !matches!(first_text, "match" | "case" | "type")
++    }
++
++    /// Whether `kind`, known to be used as a *binary* operator here, is exempt from the
++    /// whitespace requirement.
++    ///
++    /// Same set as [`Self::exempts_whitespace`] plus `*` and `**`, which are safe to include
++    /// because the caller has already established this is not a unary star.
++    ///
++    /// This covers E226/E227/E228 as well as E225. `operator-spacing = "precedence"` writes
++    /// `a/b` and `a%b`, and E226 and E228 flag exactly those, so relaxing only E225 would
++    /// leave `ruff check` complaining about output `ruff format` had just produced.
++    pub fn exempts_binary_whitespace(&self, kind: TokenKind) -> bool {
++        self.operator_spacing_precedence
++            && matches!(
++                kind,
++                TokenKind::Star
++                    | TokenKind::DoubleStar
++                    | TokenKind::Slash
++                    | TokenKind::DoubleSlash
++                    | TokenKind::Percent
++                    | TokenKind::At
++            )
++    }
++}
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/mod.rs b/crates/ruff_linter/src/rules/pycodestyle/mod.rs
+index fcbd0345fd..95db05b47e 100644
+--- a/crates/ruff_linter/src/rules/pycodestyle/mod.rs
++++ b/crates/ruff_linter/src/rules/pycodestyle/mod.rs
+@@ -1,4 +1,5 @@
+ //! Rules from [pycodestyle](https://pypi.org/project/pycodestyle/).
++pub mod compact;
+ pub(crate) mod rules;
+ pub mod settings;
+ 
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
+index 32795e95d5..b0705170a9 100644
+--- a/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
++++ b/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
+@@ -23,9 +23,7 @@ use crate::line_width::IndentWidth;
+ use crate::rules::pycodestyle::helpers::is_non_logical_token;
+ use crate::{AlwaysFixableViolation, Edit, Fix, Locator, Violation};
+ 
+-/// Number of blank lines around top level classes and functions.
+-const BLANK_LINES_TOP_LEVEL: u32 = 2;
+-/// Number of blank lines around methods and nested classes and functions.
++/// Number of blank lines around methods and nested classes and functions (used in violation message).
+ const BLANK_LINES_NESTED_LEVEL: u32 = 1;
+ 
+ /// ## What it does
+@@ -699,6 +697,8 @@ pub(crate) struct BlankLinesChecker<'a, 'b> {
+     source_type: PySourceType,
+     cell_offsets: Option<&'a CellOffsets>,
+     context: &'a LintContext<'b>,
++    top_level_blank_lines: u32,
++    nested_blank_lines: u32,
+ }
+ 
+ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -709,12 +709,15 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+         cell_offsets: Option<&'a CellOffsets>,
+         context: &'a LintContext<'b>,
+     ) -> BlankLinesChecker<'a, 'b> {
++        let pcs = &context.settings().pycodestyle;
+         BlankLinesChecker {
+             stylist,
+             locator,
+             source_type,
+             cell_offsets,
+             context,
++            top_level_blank_lines: pcs.compact.top_level_blank_lines,
++            nested_blank_lines: pcs.compact.nested_blank_lines,
+         }
+     }
+ 
+@@ -836,7 +839,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+         state: &BlankLinesState,
+         prev_indent_length: Option<usize>,
+     ) {
+-        if line.preceding_blank_lines == 0
++        if line.preceding_blank_lines < self.nested_blank_lines
+             // Only applies to methods.
+             && matches!(line.kind,  LogicalLineKind::Function | LogicalLineKind::Decorator)
+             // Allow groups of one-liners.
+@@ -870,9 +873,9 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+             1
+         } else {
+             if line.indent_length == 0 {
+-                BLANK_LINES_TOP_LEVEL
++                self.top_level_blank_lines
+             } else {
+-                BLANK_LINES_NESTED_LEVEL
++                self.nested_blank_lines
+             }
+         };
+ 
+@@ -1015,7 +1018,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+             }
+         }
+ 
+-        if line.preceding_blank_lines < BLANK_LINES_TOP_LEVEL
++        if line.preceding_blank_lines < self.top_level_blank_lines
+             && state
+                 .previous_unindented_line_kind
+                 .is_some_and(LogicalLineKind::is_class_function_or_decorator)
+@@ -1038,13 +1041,14 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+                     diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
+                         self.stylist
+                             .line_ending()
+-                            .repeat(BLANK_LINES_TOP_LEVEL as usize),
++                            .repeat(self.top_level_blank_lines as usize),
+                         blank_lines_range,
+                     )));
+                 } else {
+                     diagnostic.set_fix(Fix::safe_edit(Edit::insertion(
+                         self.stylist.line_ending().repeat(
+-                            (BLANK_LINES_TOP_LEVEL - line.preceding_blank_lines.count()) as usize,
++                            (self.top_level_blank_lines - line.preceding_blank_lines.count())
++                                as usize,
+                         ),
+                         self.locator.line_start(state.last_non_comment_line_end),
+                     )));
+@@ -1052,7 +1056,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+             }
+         }
+ 
+-        if line.preceding_blank_lines == 0
++        if line.preceding_blank_lines < self.nested_blank_lines
+             // Only apply to nested functions.
+             && matches!(state.fn_status, Status::Inside(_))
+             && line.kind.is_class_function_or_decorator()
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs
+index 999dc2f637..0b8e6d74fd 100644
+--- a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs
++++ b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs
+@@ -4,9 +4,11 @@ use ruff_text_size::Ranged;
+ 
+ use crate::Edit;
+ use crate::checkers::ast::LintContext;
++use crate::settings::LinterSettings;
+ use crate::{AlwaysFixableViolation, Fix};
+ 
+-use super::{DefinitionState, LogicalLine};
++use super::{DefinitionState, LogicalLine, LogicalLineToken};
++use crate::rules::pycodestyle::helpers::is_non_logical_token;
+ 
+ /// ## What it does
+ /// Checks for missing whitespace after `,`, `;`, and `:`.
+@@ -41,15 +43,45 @@ impl AlwaysFixableViolation for MissingWhitespace {
+ }
+ 
+ /// E231
+-pub(crate) fn missing_whitespace(line: &LogicalLine, context: &LintContext) {
++pub(crate) fn missing_whitespace(
++    line: &LogicalLine,
++    context: &LintContext,
++    settings: &LinterSettings,
++) {
+     let mut interpolated_strings = 0u32;
+     let mut definition_state = DefinitionState::from_tokens(line.tokens());
+     let mut brackets = Vec::new();
++    // A lambda's colon sits at bracket depth zero in a line that starts with a name
++    // (`f = lambda q:q`), which would otherwise look exactly like an annotated assignment.
++    // The formatter never writes that colon tight, so it must keep reporting.
++    let mut seen_lambda = false;
++    // Captured once: distinguishing an annotation colon from a compound-statement colon needs
++    // to know how the logical line starts. The text scan is skipped entirely unless the option
++    // that needs it is enabled.
++    // `.first()` is not enough: a logical line's token slice can open with NEWLINE/INDENT/DEDENT
++    // trivia carried over from the preceding statement, which would misidentify the line.
++    let first_kind = line
++        .tokens()
++        .iter()
++        .find(|token| !is_non_logical_token(token.kind()))
++        .map(LogicalLineToken::kind);
++    let first_text = if settings.pycodestyle.compact.annotation_spacing_compact {
++        let trimmed = line.text().trim_start();
++        let end = trimmed
++            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
++            .unwrap_or(trimmed.len());
++        &trimmed[..end]
++    } else {
++        ""
++    };
+     let mut iter = line.tokens().iter().peekable();
+ 
+     while let Some(token) = iter.next() {
+         let kind = token.kind();
+         definition_state.visit_token_kind(kind);
++        if kind == TokenKind::Lambda {
++            seen_lambda = true;
++        }
+         match kind {
+             TokenKind::FStringStart | TokenKind::TStringStart => interpolated_strings += 1,
+             TokenKind::FStringEnd | TokenKind::TStringEnd => {
+@@ -102,6 +134,29 @@ pub(crate) fn missing_whitespace(line: &LogicalLine, context: &LintContext) {
+                             (TokenKind::Colon, TokenKind::Equal) => {
+                                 continue; // Allow assignment expression
+                             }
++                            // dict-spacing = "compact": allow {"a":1}
++                            (TokenKind::Colon, _)
++                                if settings.pycodestyle.compact.dict_spacing_compact
++                                    && matches!(brackets.last(), Some(TokenKind::Lbrace)) =>
++                            {
++                                continue;
++                            }
++                            // annotation-spacing = "compact": allow `def f(x:int)` and, at
++                            // bracket depth zero, annotated assignments like `value:int = 3`.
++                            (TokenKind::Colon, _)
++                                if settings.pycodestyle.compact.annotation_spacing_compact
++                                    && (definition_state.in_function_definition()
++                                        || (brackets.is_empty()
++                                            && !seen_lambda
++                                            && settings
++                                                .pycodestyle
++                                                .compact
++                                                .is_annotation_colon_line(
++                                                    first_kind, first_text,
++                                                ))) =>
++                            {
++                                continue;
++                            }
+                             _ => {}
+                         }
+                     }
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs
+index db28627b28..2f831ea92d 100644
+--- a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs
++++ b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs
+@@ -5,6 +5,7 @@ use ruff_text_size::{Ranged, TextRange};
+ use crate::checkers::ast::LintContext;
+ use crate::rules::pycodestyle::helpers::is_non_logical_token;
+ use crate::rules::pycodestyle::rules::logical_lines::{DefinitionState, LogicalLine};
++use crate::settings::LinterSettings;
+ use crate::{AlwaysFixableViolation, Edit, Fix};
+ 
+ /// ## What it does
+@@ -165,7 +166,11 @@ impl AlwaysFixableViolation for MissingWhitespaceAroundModuloOperator {
+ }
+ 
+ /// E225, E226, E227, E228
+-pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &LintContext) {
++pub(crate) fn missing_whitespace_around_operator(
++    line: &LogicalLine,
++    context: &LintContext,
++    settings: &LinterSettings,
++) {
+     let mut definition_state = DefinitionState::from_tokens(line.tokens());
+     let mut tokens = line.tokens().iter().peekable();
+     let first_token = tokens
+@@ -214,7 +219,14 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
+                 Some(TokenKind::Comma | TokenKind::Rpar | TokenKind::Colon)
+             );
+ 
+-            NeedsSpace::from(!slash_in_func)
++            // `operator-spacing = "precedence"` writes division tight (`a/b`). This branch is
++            // reached before the generic `is_whitespace_needed` path below, so the exemption
++            // has to be repeated here or E226 flags what the formatter just produced.
++            if settings.pycodestyle.compact.exempts_whitespace(kind) {
++                NeedsSpace::No
++            } else {
++                NeedsSpace::from(!slash_in_func)
++            }
+         } else if kind.is_unary_arithmetic_operator()
+             || matches!(kind, TokenKind::Star | TokenKind::DoubleStar)
+         {
+@@ -231,7 +243,9 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
+             };
+ 
+             if is_binary {
+-                if kind == TokenKind::DoubleStar {
++                if settings.pycodestyle.compact.exempts_binary_whitespace(kind) {
++                    NeedsSpace::No
++                } else if kind == TokenKind::DoubleStar {
+                     // Enforce consistent spacing, but don't enforce whitespaces.
+                     NeedsSpace::Optional
+                 } else {
+@@ -255,7 +269,7 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
+             // However, allow it in order to prevent entering an infinite loop in which E225 adds a
+             // space only for E202 to remove it.
+             NeedsSpace::No
+-        } else if is_whitespace_needed(kind) {
++        } else if is_whitespace_needed(kind, &settings.pycodestyle) {
+             NeedsSpace::Yes
+         } else {
+             NeedsSpace::No
+@@ -356,7 +370,14 @@ fn diagnostic_kind_for_operator<'a>(
+     }
+ }
+ 
+-fn is_whitespace_needed(kind: TokenKind) -> bool {
++fn is_whitespace_needed(
++    kind: TokenKind,
++    pycodestyle: &crate::rules::pycodestyle::settings::Settings,
++) -> bool {
++    if pycodestyle.compact.exempts_whitespace(kind) {
++        return false;
++    }
++
+     if matches!(
+         kind,
+         TokenKind::DoubleStarEqual
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs
+index 66c1c95dd3..4fc1c3dac6 100644
+--- a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs
++++ b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs
+@@ -4,6 +4,7 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
+ 
+ use crate::checkers::ast::LintContext;
+ use crate::rules::pycodestyle::rules::logical_lines::{DefinitionState, LogicalLine};
++use crate::settings::LinterSettings;
+ use crate::{AlwaysFixableViolation, Edit, Fix};
+ 
+ /// ## What it does
+@@ -87,7 +88,11 @@ impl AlwaysFixableViolation for MissingWhitespaceAroundParameterEquals {
+ }
+ 
+ /// E251, E252
+-pub(crate) fn whitespace_around_named_parameter_equals(line: &LogicalLine, context: &LintContext) {
++pub(crate) fn whitespace_around_named_parameter_equals(
++    line: &LogicalLine,
++    context: &LintContext,
++    settings: &LinterSettings,
++) {
+     let mut parens = 0u32;
+     let mut fstrings = 0u32;
+     let mut annotated_func_arg = false;
+@@ -121,7 +126,11 @@ pub(crate) fn whitespace_around_named_parameter_equals(line: &LogicalLine, conte
+             TokenKind::Equal
+                 if definition_state.in_type_params() || (parens > 0 && fstrings == 0) =>
+             {
+-                if definition_state.in_type_params() || (annotated_func_arg && parens == 1) {
++                if definition_state.in_type_params()
++                    || (annotated_func_arg
++                        && parens == 1
++                        && !settings.pycodestyle.compact.default_value_spacing_compact)
++                {
+                     let start = token.start();
+                     if start == prev_end && prev_end != TextSize::new(0) {
+                         if let Some(mut diagnostic) = context.report_diagnostic_if_enabled(
+diff --git a/crates/ruff_linter/src/rules/pycodestyle/settings.rs b/crates/ruff_linter/src/rules/pycodestyle/settings.rs
+index b034a77874..614a8d1f53 100644
+--- a/crates/ruff_linter/src/rules/pycodestyle/settings.rs
++++ b/crates/ruff_linter/src/rules/pycodestyle/settings.rs
+@@ -5,12 +5,17 @@ use ruff_macros::CacheKey;
+ use std::fmt;
+ 
+ use crate::line_width::LineLength;
++use crate::rules::pycodestyle::compact::CompactSettings;
+ 
+ #[derive(Debug, Clone, Default, CacheKey)]
+ pub struct Settings {
+     pub max_line_length: LineLength,
+     pub max_doc_length: Option<LineLength>,
+     pub ignore_overlong_task_comments: bool,
++
++    /// Fork-specific settings mirroring the formatter's compact options. Bundled so upstream
++    /// syncs touch one line of this struct rather than seven.
++    pub compact: CompactSettings,
+ }
+ 
+ impl fmt::Display for Settings {
+@@ -22,6 +27,7 @@ impl fmt::Display for Settings {
+                 self.max_line_length,
+                 self.max_doc_length | optional,
+                 self.ignore_overlong_task_comments,
++                self.compact | nested,
+             ]
+         }
+         Ok(())
+diff --git a/crates/ruff_workspace/src/compact.rs b/crates/ruff_workspace/src/compact.rs
+new file mode 100644
+index 0000000000..6a0adbc1a9
+--- /dev/null
++++ b/crates/ruff_workspace/src/compact.rs
+@@ -0,0 +1,110 @@
++//! Fork-owned glue for the compact formatting options.
++//!
++//! Everything in this file is specific to this fork and has no upstream counterpart. Keeping
++//! it here — rather than inline in `configuration.rs` — means an upstream sync conflicts on a
++//! single call site instead of a forty-line block wedged inside `Configuration::into_settings`.
++
++use ruff_python_formatter::CompactOptions;
++
++use crate::configuration::FormatConfiguration;
++
++/// Resolve the user's `[format]` compact options against the defaults.
++///
++/// Mirrors how `into_settings` resolves every other formatter option: an explicitly configured
++/// value wins, otherwise the default carries through.
++pub(crate) fn resolve_compact_options(
++    format: &FormatConfiguration,
++    defaults: &CompactOptions,
++) -> CompactOptions {
++    CompactOptions::default()
++        .with_annotation_spacing(
++            format
++                .annotation_spacing
++                .unwrap_or(defaults.annotation_spacing()),
++        )
++        .with_top_level_blank_lines(
++            format
++                .top_level_blank_lines
++                .unwrap_or(defaults.top_level_blank_lines()),
++        )
++        .with_operator_spacing(
++            format
++                .operator_spacing
++                .unwrap_or(defaults.operator_spacing()),
++        )
++        .with_dict_spacing(format.dict_spacing.unwrap_or(defaults.dict_spacing()))
++        .with_slice_spacing(format.slice_spacing.unwrap_or(defaults.slice_spacing()))
++        .with_nested_blank_lines(
++            format
++                .nested_blank_lines
++                .unwrap_or(defaults.nested_blank_lines()),
++        )
++        .with_default_value_spacing(
++            format
++                .default_value_spacing
++                .unwrap_or(defaults.default_value_spacing()),
++        )
++        .with_import_trailing_comma(
++            format
++                .import_trailing_comma
++                .unwrap_or(defaults.import_trailing_comma()),
++        )
++        .with_comment_blank_lines(
++            format
++                .comment_blank_lines
++                .unwrap_or(defaults.comment_blank_lines()),
++        )
++}
++
++/// Propagate compact formatter options into the pycodestyle linter settings.
++///
++/// Without this, rules like `E225`/`E231`/`E301` flag the formatter's own compact output and
++/// `ruff format` and `ruff check --fix` fight each other indefinitely. Each option relaxes
++/// exactly the rules whose expectations it contradicts.
++pub(crate) fn propagate_to_pycodestyle(
++    compact: &CompactOptions,
++    pcs: &mut ruff_linter::rules::pycodestyle::settings::Settings,
++) {
++    if compact.top_level_blank_lines().is_one() {
++        pcs.compact.top_level_blank_lines = 1;
++    }
++    if compact.nested_blank_lines().is_zero() {
++        pcs.compact.nested_blank_lines = 0;
++    }
++    if compact.operator_spacing().is_precedence() {
++        pcs.compact.operator_spacing_precedence = true;
++    }
++    if compact.annotation_spacing().is_compact() {
++        pcs.compact.annotation_spacing_compact = true;
++    }
++    if compact.dict_spacing().is_compact() {
++        pcs.compact.dict_spacing_compact = true;
++    }
++    if compact.default_value_spacing().is_compact() {
++        pcs.compact.default_value_spacing_compact = true;
++    }
++    if compact.import_trailing_comma().is_never() {
++        pcs.compact.import_trailing_comma_never = true;
++    }
++}
++
++/// Reconcile isort's `lines-after-imports` with `top-level-blank-lines = "one"`.
++///
++/// isort would otherwise insert two blank lines after the import block while the formatter
++/// collapses them to one, causing `format` and `check --fix` to cycle. Only applies when the
++/// user has not set `lines-after-imports` explicitly (`-1` is isort's "unset" sentinel).
++pub(crate) fn reconcile_isort(
++    compact: &CompactOptions,
++    isort: &mut ruff_linter::rules::isort::settings::Settings,
++) {
++    if compact.top_level_blank_lines().is_one() && isort.lines_after_imports == -1 {
++        isort.lines_after_imports = 1;
++    }
++
++    // I001 rewrites wrapped import blocks itself, appending a comma after every alias. With
++    // `import-trailing-comma = "never"` the formatter then strips that comma straight back off,
++    // so the two oscillate. Teach isort to stop emitting it.
++    if compact.import_trailing_comma().is_never() {
++        isort.emit_trailing_comma = false;
++    }
++}
+diff --git a/crates/ruff_workspace/src/configuration.rs b/crates/ruff_workspace/src/configuration.rs
+index 41b6525731..d6b6f1f307 100644
+--- a/crates/ruff_workspace/src/configuration.rs
++++ b/crates/ruff_workspace/src/configuration.rs
+@@ -42,7 +42,9 @@ use ruff_linter::{
+ };
+ use ruff_python_ast as ast;
+ use ruff_python_formatter::{
+-    DocstringCode, DocstringCodeLineWidth, MagicTrailingComma, QuoteStyle,
++    AnnotationSpacing, CommentBlankLines, DefaultValueSpacing, DictSpacing, DocstringCode,
++    DocstringCodeLineWidth, ImportTrailingComma, MagicTrailingComma, NestedBlankLines,
++    OperatorSpacing, QuoteStyle, SliceSpacing, TopLevelBlankLines,
+ };
+ 
+ use crate::options::{
+@@ -222,6 +224,10 @@ impl Configuration {
+         let format = self.format;
+         let format_defaults = FormatterSettings::default();
+ 
++        // Resolved up front: `format` is partially moved further down (e.g. `format.exclude`),
++        // so the compact options must be read while it is still whole.
++        let compact = crate::compact::resolve_compact_options(&format, &format_defaults.compact);
++
+         let quote_style = format.quote_style.unwrap_or(format_defaults.quote_style);
+         let format_preview = match format.preview.unwrap_or(global_preview) {
+             PreviewMode::Disabled => ruff_python_formatter::PreviewMode::Disabled,
+@@ -264,6 +270,7 @@ impl Configuration {
+             docstring_code_line_width: format
+                 .docstring_code_line_width
+                 .unwrap_or(format_defaults.docstring_code_line_width),
++            compact,
+         };
+ 
+         let analyze = self.analyze;
+@@ -299,11 +306,13 @@ impl Configuration {
+         let rules = lint.as_rule_table(lint_preview)?;
+ 
+         // LinterSettings validation
+-        let isort = lint
++        let mut isort = lint
+             .isort
+             .map(IsortOptions::try_into_settings)
+             .transpose()?
+             .unwrap_or_default();
++
++        crate::compact::reconcile_isort(&formatter.compact, &mut isort);
+         let flake8_import_conventions = lint
+             .flake8_import_conventions
+             .map(|options| options.try_into_settings(lint_preview))
+@@ -480,13 +489,17 @@ impl Configuration {
+                     .map(Pep8NamingOptions::try_into_settings)
+                     .transpose()?
+                     .unwrap_or_default(),
+-                pycodestyle: if let Some(pycodestyle) = lint.pycodestyle {
+-                    pycodestyle.into_settings(line_length)
+-                } else {
+-                    pycodestyle::settings::Settings {
+-                        max_line_length: line_length,
+-                        ..pycodestyle::settings::Settings::default()
+-                    }
++                pycodestyle: {
++                    let mut pcs = if let Some(pycodestyle) = lint.pycodestyle {
++                        pycodestyle.into_settings(line_length)
++                    } else {
++                        pycodestyle::settings::Settings {
++                            max_line_length: line_length,
++                            ..pycodestyle::settings::Settings::default()
++                        }
++                    };
++                    crate::compact::propagate_to_pycodestyle(&formatter.compact, &mut pcs);
++                    pcs
+                 },
+                 pydoclint: lint
+                     .pydoclint
+@@ -1331,6 +1344,15 @@ pub struct FormatConfiguration {
+     pub line_ending: Option<LineEnding>,
+     pub docstring_code_format: Option<DocstringCode>,
+     pub docstring_code_line_width: Option<DocstringCodeLineWidth>,
++    pub annotation_spacing: Option<AnnotationSpacing>,
++    pub top_level_blank_lines: Option<TopLevelBlankLines>,
++    pub operator_spacing: Option<OperatorSpacing>,
++    pub dict_spacing: Option<DictSpacing>,
++    pub slice_spacing: Option<SliceSpacing>,
++    pub nested_blank_lines: Option<NestedBlankLines>,
++    pub default_value_spacing: Option<DefaultValueSpacing>,
++    pub import_trailing_comma: Option<ImportTrailingComma>,
++    pub comment_blank_lines: Option<CommentBlankLines>,
+ }
+ 
+ impl FormatConfiguration {
+@@ -1368,6 +1390,15 @@ impl FormatConfiguration {
+                 }
+             }),
+             docstring_code_line_width: options.docstring_code_line_length,
++            annotation_spacing: options.annotation_spacing,
++            top_level_blank_lines: options.top_level_blank_lines,
++            operator_spacing: options.operator_spacing,
++            dict_spacing: options.dict_spacing,
++            slice_spacing: options.slice_spacing,
++            nested_blank_lines: options.nested_blank_lines,
++            default_value_spacing: options.default_value_spacing,
++            import_trailing_comma: options.import_trailing_comma,
++            comment_blank_lines: options.comment_blank_lines,
+         })
+     }
+ 
+@@ -1388,6 +1419,15 @@ impl FormatConfiguration {
+             docstring_code_line_width: self
+                 .docstring_code_line_width
+                 .or(config.docstring_code_line_width),
++            annotation_spacing: self.annotation_spacing.or(config.annotation_spacing),
++            top_level_blank_lines: self.top_level_blank_lines.or(config.top_level_blank_lines),
++            operator_spacing: self.operator_spacing.or(config.operator_spacing),
++            dict_spacing: self.dict_spacing.or(config.dict_spacing),
++            slice_spacing: self.slice_spacing.or(config.slice_spacing),
++            nested_blank_lines: self.nested_blank_lines.or(config.nested_blank_lines),
++            default_value_spacing: self.default_value_spacing.or(config.default_value_spacing),
++            import_trailing_comma: self.import_trailing_comma.or(config.import_trailing_comma),
++            comment_blank_lines: self.comment_blank_lines.or(config.comment_blank_lines),
+         }
+     }
+ }
+diff --git a/crates/ruff_workspace/src/lib.rs b/crates/ruff_workspace/src/lib.rs
+index bc8505c346..0daea95b28 100644
+--- a/crates/ruff_workspace/src/lib.rs
++++ b/crates/ruff_workspace/src/lib.rs
+@@ -1,3 +1,4 @@
++mod compact;
+ pub mod configuration;
+ pub mod options;
+ pub mod pyproject;
+diff --git a/crates/ruff_workspace/src/options.rs b/crates/ruff_workspace/src/options.rs
+index f28a960dad..0bf91f78ae 100644
+--- a/crates/ruff_workspace/src/options.rs
++++ b/crates/ruff_workspace/src/options.rs
+@@ -40,7 +40,11 @@ use ruff_linter::{UnresolvedRuleSelector, warn_user_once};
+ use ruff_macros::{CombineOptions, OptionsMetadata};
+ use ruff_options_metadata::{OptionsMetadata, Visit};
+ use ruff_python_ast::name::Name;
+-use ruff_python_formatter::{DocstringCodeLineWidth, QuoteStyle};
++use ruff_python_formatter::{
++    AnnotationSpacing, CommentBlankLines, DefaultValueSpacing, DictSpacing, DocstringCodeLineWidth,
++    ImportTrailingComma, NestedBlankLines, OperatorSpacing, QuoteStyle, SliceSpacing,
++    TopLevelBlankLines,
++};
+ use ruff_python_semantic::NameImports;
+ use ruff_python_stdlib::identifiers::is_identifier;
+ use ruff_ranged_value::ValueSourceGuard;
+@@ -3104,6 +3108,8 @@ impl IsortOptions {
+         }
+ 
+         Ok(isort::settings::Settings {
++            // Fork: overridden later from `format.import-trailing-comma` in `compact::reconcile_isort`.
++            emit_trailing_comma: true,
+             required_imports: self
+                 .required_imports
+                 .unwrap_or_default()
+@@ -3347,6 +3353,8 @@ impl PycodestyleOptions {
+             max_doc_length: self.max_doc_length,
+             max_line_length: self.max_line_length.unwrap_or(global_line_length),
+             ignore_overlong_task_comments: self.ignore_overlong_task_comments.unwrap_or_default(),
++            // Formatter-aware fields are set in configuration.rs::into_settings()
++            ..pycodestyle::settings::Settings::default()
+         }
+     }
+ }
+@@ -4171,6 +4179,207 @@ pub struct FormatOptions {
+         "#
+     )]
+     pub docstring_code_line_length: Option<DocstringCodeLineWidth>,
++
++    /// Controls spacing around type annotation colons (`:`) and return type arrows (`->`).
++    ///
++    /// * `spaced` (default): Standard PEP 8 / Black spacing: `def f(x: int) -> bool:`
++    /// * `compact`: No spaces around annotation punctuation: `def f(x:int)->bool:`
++    ///
++    /// For example, with `annotation-spacing = "compact"`:
++    ///
++    /// ```python
++    /// def f(x:int, y:str)->bool:
++    ///     z:int = x + len(y)
++    ///     return z > 0
++    /// ```
++    #[option(
++        default = r#""spaced""#,
++        value_type = r#""spaced" | "compact""#,
++        example = r#"
++            # Use compact annotation spacing (no spaces around `:` and `->`).
++            annotation-spacing = "compact"
++        "#
++    )]
++    pub annotation_spacing: Option<AnnotationSpacing>,
++
++    /// Number of blank lines required between top-level statements that include
++    /// at least one class or function definition.
++    ///
++    /// * `two` (default): Two blank lines, per PEP 8 and Black.
++    /// * `one`: A single blank line between top-level definitions.
++    ///
++    /// For example, with `top-level-blank-lines = "one"`:
++    ///
++    /// ```python
++    /// def foo():
++    ///     pass
++    ///
++    /// def bar():
++    ///     pass
++    /// ```
++    #[option(
++        default = r#""two""#,
++        value_type = r#""one" | "two""#,
++        example = r#"
++            # Use a single blank line between top-level definitions.
++            top-level-blank-lines = "one"
++        "#
++    )]
++    pub top_level_blank_lines: Option<TopLevelBlankLines>,
++
++    /// Controls spacing around binary operators based on their precedence.
++    ///
++    /// * `spaced` (default): Standard PEP 8 / Black spacing — spaces around all binary operators.
++    /// * `precedence`: No spaces around high-precedence operators (`**`, `*`, `/`, `//`, `%`, `@`);
++    ///   spaces around everything else (`+`, `-`, `|`, `&`, etc.).
++    ///
++    /// For example, with `operator-spacing = "precedence"`:
++    ///
++    /// ```python
++    /// result = a*b + c/d - e%f
++    /// value = base**2 + offset
++    /// ```
++    #[option(
++        default = r#""spaced""#,
++        value_type = r#""spaced" | "precedence""#,
++        example = r#"
++            # Use precedence-aware operator spacing.
++            operator-spacing = "precedence"
++        "#
++    )]
++    pub operator_spacing: Option<OperatorSpacing>,
++
++    /// Controls spacing after the colon in dictionary literals.
++    ///
++    /// * `spaced` (default): Standard PEP 8 / Black spacing: `{"a": 1}`
++    /// * `compact`: No space after colon: `{"a":1}`
++    ///
++    /// For example, with `dict-spacing = "compact"`:
++    ///
++    /// ```python
++    /// d = {"a":1, "b":2}
++    /// ```
++    #[option(
++        default = r#""spaced""#,
++        value_type = r#""spaced" | "compact""#,
++        example = r#"
++            # Use compact dict spacing (no space after colon).
++            dict-spacing = "compact"
++        "#
++    )]
++    pub dict_spacing: Option<DictSpacing>,
++
++    /// Controls spacing around colons in slice expressions.
++    ///
++    /// * `spaced` (default): Black-compatible behavior — spaces around colons for complex expressions.
++    /// * `compact`: Never add spaces around colons, even for complex expressions like `x[a():b()]`.
++    ///
++    /// For example, with `slice-spacing = "compact"`:
++    ///
++    /// ```python
++    /// x[1:2:3]
++    /// x[a():b()]
++    /// ```
++    #[option(
++        default = r#""spaced""#,
++        value_type = r#""spaced" | "compact""#,
++        example = r#"
++            # Use compact slice spacing (no spaces around colons).
++            slice-spacing = "compact"
++        "#
++    )]
++    pub slice_spacing: Option<SliceSpacing>,
++
++    /// Controls blank lines between statements in nested scopes (class bodies, function bodies).
++    ///
++    /// * `one` (default): One blank line between class methods / nested definitions (Black-compatible).
++    /// * `zero`: No blank lines between class methods / nested definitions.
++    ///
++    /// For example, with `nested-blank-lines = "zero"`:
++    ///
++    /// ```python
++    /// class Foo:
++    ///     def method_a(self):
++    ///         pass
++    ///     def method_b(self):
++    ///         pass
++    /// ```
++    #[option(
++        default = r#""one""#,
++        value_type = r#""one" | "zero""#,
++        example = r#"
++            # Remove blank lines between class methods.
++            nested-blank-lines = "zero"
++        "#
++    )]
++    pub nested_blank_lines: Option<NestedBlankLines>,
++
++    /// Controls spacing around `=` in default parameter values.
++    ///
++    /// * `spaced` (default): Spaces around `=` when the parameter has a type annotation (Black-compatible).
++    /// * `compact`: No spaces around `=` regardless of annotation.
++    ///
++    /// For example, with `default-value-spacing = "compact"`:
++    ///
++    /// ```python
++    /// def f(x=1, y:int=2):
++    ///     pass
++    /// ```
++    #[option(
++        default = r#""spaced""#,
++        value_type = r#""spaced" | "compact""#,
++        example = r#"
++            # Use compact default value spacing (no spaces around `=`).
++            default-value-spacing = "compact"
++        "#
++    )]
++    pub default_value_spacing: Option<DefaultValueSpacing>,
++
++    /// Controls whether trailing commas are added to multi-line import statements.
++    ///
++    /// * `always` (default): Always add trailing commas (Black-compatible).
++    /// * `never`: Never add trailing commas to multi-line imports.
++    ///
++    /// For example, with `import-trailing-comma = "never"`:
++    ///
++    /// ```python
++    /// from module import (
++    ///     foo,
++    ///     bar
++    /// )
++    /// ```
++    #[option(
++        default = r#""always""#,
++        value_type = r#""always" | "never""#,
++        example = r#"
++            # Don't add trailing commas to multi-line imports.
++            import-trailing-comma = "never"
++        "#
++    )]
++    pub import_trailing_comma: Option<ImportTrailingComma>,
++
++    /// Controls blank lines around comments in nested (non-top-level) scopes.
++    ///
++    /// * `standard` (default): Preserve blank lines around comments in compound statements (Black-compatible).
++    /// * `compact`: Remove blank lines around comments in nested scopes.
++    ///
++    /// For example, with `comment-blank-lines = "compact"`:
++    ///
++    /// ```python
++    /// class Foo:
++    ///     # This comment has no blank line above or below
++    ///     def method(self):
++    ///         pass
++    /// ```
++    #[option(
++        default = r#""standard""#,
++        value_type = r#""standard" | "compact""#,
++        example = r#"
++            # Remove blank lines around comments in nested scopes.
++            comment-blank-lines = "compact"
++        "#
++    )]
++    pub comment_blank_lines: Option<CommentBlankLines>,
+ }
+ 
+ /// Configures Ruff's `analyze` command.
+diff --git a/crates/ruff_workspace/src/settings.rs b/crates/ruff_workspace/src/settings.rs
+index 8527e17aff..15148b24b8 100644
+--- a/crates/ruff_workspace/src/settings.rs
++++ b/crates/ruff_workspace/src/settings.rs
+@@ -11,8 +11,8 @@ use ruff_linter::settings::types::{
+ use ruff_macros::CacheKey;
+ use ruff_python_ast::{PySourceType, PythonVersion};
+ use ruff_python_formatter::{
+-    DocstringCode, DocstringCodeLineWidth, MagicTrailingComma, NestedStringQuoteStyle, PreviewMode,
+-    PyFormatOptions, QuoteStyle,
++    CompactOptions, DocstringCode, DocstringCodeLineWidth, MagicTrailingComma,
++    NestedStringQuoteStyle, PreviewMode, PyFormatOptions, QuoteStyle,
+ };
+ use ruff_source_file::find_newline;
+ use std::fmt;
+@@ -208,6 +208,10 @@ pub struct FormatterSettings {
+ 
+     pub docstring_code_format: DocstringCode,
+     pub docstring_code_line_width: DocstringCodeLineWidth,
++
++    /// Fork-specific compact formatting options, bundled into one field so upstream
++    /// syncs touch a single line here rather than nine.
++    pub compact: CompactOptions,
+ }
+ 
+ impl FormatterSettings {
+@@ -254,6 +258,7 @@ impl FormatterSettings {
+             .with_line_width(self.line_width)
+             .with_docstring_code(self.docstring_code_format)
+             .with_docstring_code_line_width(self.docstring_code_line_width)
++            .with_compact(self.compact)
+     }
+ 
+     /// Resolve the [`PythonVersion`] to use for formatting.
+@@ -287,6 +292,7 @@ impl Default for FormatterSettings {
+             magic_trailing_comma: default_options.magic_trailing_comma(),
+             docstring_code_format: default_options.docstring_code(),
+             docstring_code_line_width: default_options.docstring_code_line_width(),
++            compact: *default_options.compact(),
+         }
+     }
+ }
+@@ -313,6 +319,9 @@ impl fmt::Display for FormatterSettings {
+                 self.docstring_code_line_width,
+             ]
+         }
++        // Emitted separately: `display_settings!` only accepts single-identifier field paths,
++        // so it cannot reach into `compact`. Same namespace, so output is unchanged.
++        self.compact.fmt_settings(f, "formatter.")?;
+         Ok(())
+     }
+ }
+-- 
+2.43.0
+

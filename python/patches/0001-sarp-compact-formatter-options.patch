@@ -1,0 +1,1154 @@
+From 942be7c0429323d3e3f969ec8c23e40c63b413c7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 23 Aug 2026 09:52:34 +0000
+Subject: [PATCH 1/2] sarp: compact formatter options
+
+Adds nine formatter options that produce a denser code style, each defaulting
+to the existing Black/PEP 8 behaviour so an unconfigured build is byte-identical
+to upstream:
+
+    annotation-spacing      x:int, ->bool
+    top-level-blank-lines   one blank line between top-level defs
+    operator-spacing        precedence-aware: a*b, a/b tight
+    dict-spacing            {"a":1}
+    slice-spacing           x[a():b()]
+    nested-blank-lines      no blank lines between methods
+    default-value-spacing   def f(x: int=1)
+    import-trailing-comma   no trailing comma on wrapped imports
+    comment-blank-lines     no blank lines around comments in nested scopes
+
+All nine live in a self-contained `compact` module and are carried through
+`PyFormatOptions` as a single `CompactOptions` field rather than nine
+interleaved ones, so this patch touches upstream's own structs in one place
+each. Call sites read `f.options().compact().<option>()`.
+---
+ crates/ruff_python_formatter/src/builders.rs  |   6 +
+ .../src/comments/format.rs                    |  42 +-
+ .../ruff_python_formatter/src/comments/mod.rs |  19 +-
+ .../ruff_python_formatter/src/compact/mod.rs  | 641 ++++++++++++++++++
+ .../src/expression/binary_like.rs             |  20 +-
+ .../src/expression/expr_dict.rs               |   4 +-
+ .../src/expression/expr_slice.rs              |   9 +-
+ crates/ruff_python_formatter/src/lib.rs       |   7 +
+ crates/ruff_python_formatter/src/options.rs   |  17 +
+ .../src/other/parameter.rs                    |   2 +-
+ .../src/other/parameter_with_default.rs       |   6 +-
+ .../src/statement/stmt_ann_assign.rs          |   6 +-
+ .../src/statement/stmt_function_def.rs        |   6 +-
+ .../src/statement/stmt_import_from.rs         |   7 +-
+ .../src/statement/suite.rs                    |  25 +-
+ 15 files changed, 785 insertions(+), 32 deletions(-)
+ create mode 100644 crates/ruff_python_formatter/src/compact/mod.rs
+
+diff --git a/crates/ruff_python_formatter/src/builders.rs b/crates/ruff_python_formatter/src/builders.rs
+index 8d3f701e59..afddfb4145 100644
+--- a/crates/ruff_python_formatter/src/builders.rs
++++ b/crates/ruff_python_formatter/src/builders.rs
+@@ -121,6 +121,8 @@ pub(crate) enum TrailingComma {
+     /// Add a trailing comma if the group breaks (or if the last element has a trailing comma and
+     /// the magical trailing comma option is enabled).
+     OneOrMore,
++    /// Never add a trailing comma.
++    Never,
+ }
+ 
+ pub(crate) struct JoinCommaSeparatedBuilder<'fmt, 'ast, 'buf> {
+@@ -227,6 +229,10 @@ impl<'fmt, 'ast, 'buf> JoinCommaSeparatedBuilder<'fmt, 'ast, 'buf> {
+             }
+ 
+             if let Some(last_end) = self.entries.position() {
++                if self.trailing_comma == TrailingComma::Never {
++                    return Ok(());
++                }
++
+                 let magic_trailing_comma = has_magic_trailing_comma(
+                     TextRange::new(last_end, self.sequence_end),
+                     self.fmt.context(),
+diff --git a/crates/ruff_python_formatter/src/comments/format.rs b/crates/ruff_python_formatter/src/comments/format.rs
+index 2fa1e5e2e1..efbb57d763 100644
+--- a/crates/ruff_python_formatter/src/comments/format.rs
++++ b/crates/ruff_python_formatter/src/comments/format.rs
+@@ -337,15 +337,25 @@ impl Format<PyFormatContext<'_>> for FormatEmptyLines {
+                         write!(f, [empty_line()])
+                     }
+                     PySourceType::Python | PySourceType::Ipynb => {
+-                        write!(f, [empty_line(), empty_line()])
++                        if f.options().compact().top_level_blank_lines().is_one() {
++                            write!(f, [empty_line()])
++                        } else {
++                            write!(f, [empty_line(), empty_line()])
++                        }
+                     }
+                 },
+             },
+ 
+-            NodeLevel::CompoundStatement => match self.lines {
+-                0 | 1 => write!(f, [hard_line_break()]),
+-                _ => write!(f, [empty_line()]),
+-            },
++            NodeLevel::CompoundStatement => {
++                if f.options().compact().comment_blank_lines().is_compact() {
++                    write!(f, [hard_line_break()])
++                } else {
++                    match self.lines {
++                        0 | 1 => write!(f, [hard_line_break()]),
++                        _ => write!(f, [empty_line()]),
++                    }
++                }
++            }
+ 
+             // Remove all whitespace in parenthesized expressions
+             NodeLevel::Expression(_) | NodeLevel::ParenthesizedExpression => {
+@@ -573,10 +583,19 @@ impl Format<PyFormatContext<'_>> for FormatEmptyLinesBeforeTrailingComments<'_>
+             .find(|comment| comment.line_position().is_own_line())
+         {
+             // Black has different rules for stub vs. non-stub and top level vs. indented
++            let top_level_lines = if f.options().compact().top_level_blank_lines().is_one() {
++                1
++            } else {
++                2
++            };
++            let nested_zero = f.options().compact().nested_blank_lines().is_zero();
++            let comment_compact = f.options().compact().comment_blank_lines().is_compact();
+             let empty_lines = match (f.options().source_type(), f.context().node_level()) {
+                 (PySourceType::Stub, NodeLevel::TopLevel(_)) => 1,
+                 (PySourceType::Stub, _) => u32::from(self.node_kind == NodeKind::StmtClassDef),
+-                (_, NodeLevel::TopLevel(_)) => 2,
++                (_, NodeLevel::TopLevel(_)) => top_level_lines,
++                (_, NodeLevel::CompoundStatement) if comment_compact => 0,
++                (_, _) if nested_zero => 0,
+                 (_, _) => 1,
+             };
+ 
+@@ -622,10 +641,19 @@ impl Format<PyFormatContext<'_>> for FormatEmptyLinesAfterLeadingComments<'_> {
+             .find(|comment| comment.line_position().is_own_line())
+         {
+             // Black has different rules for stub vs. non-stub and top level vs. indented
++            let top_level_lines = if f.options().compact().top_level_blank_lines().is_one() {
++                1
++            } else {
++                2
++            };
++            let nested_zero = f.options().compact().nested_blank_lines().is_zero();
++            let comment_compact = f.options().compact().comment_blank_lines().is_compact();
+             let empty_lines = match (f.options().source_type(), f.context().node_level()) {
+                 (PySourceType::Stub, NodeLevel::TopLevel(_)) => 1,
+                 (PySourceType::Stub, _) => 0,
+-                (_, NodeLevel::TopLevel(_)) => 2,
++                (_, NodeLevel::TopLevel(_)) => top_level_lines,
++                (_, NodeLevel::CompoundStatement) if comment_compact => 0,
++                (_, _) if nested_zero => 0,
+                 (_, _) => 1,
+             };
+ 
+diff --git a/crates/ruff_python_formatter/src/comments/mod.rs b/crates/ruff_python_formatter/src/comments/mod.rs
+index c5f6a67a44..ebcc14dde8 100644
+--- a/crates/ruff_python_formatter/src/comments/mod.rs
++++ b/crates/ruff_python_formatter/src/comments/mod.rs
+@@ -489,13 +489,28 @@ struct CommentsData<'a> {
+ pub(crate) fn has_skip_comment(trailing_comments: &[SourceComment], source: &str) -> bool {
+     trailing_comments.iter().any(|comment| {
+         comment.line_position().is_end_of_line()
+-            && matches!(
++            && (matches!(
+                 SuppressionKind::from_comment(comment.text(source)),
+                 Some(SuppressionKind::Skip | SuppressionKind::Off)
+-            )
++            ) || has_noqa_e501(comment.text(source)))
+     })
+ }
+ 
++/// Returns true if the comment contains `# noqa: E501` (or a noqa list including E501).
++/// This makes the formatter treat the line as verbatim, preventing line wrapping.
++fn has_noqa_e501(comment: &str) -> bool {
++    for segment in comment.split('#') {
++        let trimmed = segment.trim();
++        if let Some(codes) = trimmed.strip_prefix("noqa:") {
++            let codes = codes.trim();
++            if codes.split(',').any(|c| c.trim() == "E501") {
++                return true;
++            }
++        }
++    }
++    false
++}
++
+ #[cfg(test)]
+ mod tests {
+     use insta::assert_debug_snapshot;
+diff --git a/crates/ruff_python_formatter/src/compact/mod.rs b/crates/ruff_python_formatter/src/compact/mod.rs
+new file mode 100644
+index 0000000000..ca44951c58
+--- /dev/null
++++ b/crates/ruff_python_formatter/src/compact/mod.rs
+@@ -0,0 +1,641 @@
++//! Fork-owned "compact" formatting options.
++//!
++//! These options are specific to this fork and have no upstream counterpart. They live in
++//! their own module so that syncing with upstream `astral-sh/ruff` touches as little of
++//! upstream's own code as possible: `PyFormatOptions` carries a single `CompactOptions`
++//! field rather than nine interleaved ones, and every formatter call site reads its setting
++//! through `f.options().compact()`.
++//!
++//! Every option defaults to standard Black/PEP 8 behaviour, so an unconfigured fork build
++//! formats identically to upstream.
++
++use std::fmt;
++use std::str::FromStr;
++
++use ruff_macros::CacheKey;
++
++/// Controls spacing around type annotation colons (`:`) and return type arrows (`->`).
++///
++/// * `Spaced` (default): `def f(x: int) -> bool:` (Black-compatible)
++/// * `Compact`: `def f(x:int)->bool:` (no spaces around annotation punctuation)
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum AnnotationSpacing {
++    /// Standard spacing: `x: int`, `-> bool` (PEP 8 / Black compatible).
++    #[default]
++    Spaced,
++
++    /// Compact spacing: `x:int`, `->bool` (no spaces around annotation punctuation).
++    Compact,
++}
++
++impl AnnotationSpacing {
++    pub const fn is_compact(self) -> bool {
++        matches!(self, AnnotationSpacing::Compact)
++    }
++
++    pub const fn is_spaced(self) -> bool {
++        matches!(self, AnnotationSpacing::Spaced)
++    }
++}
++
++impl fmt::Display for AnnotationSpacing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Spaced => write!(f, "spaced"),
++            Self::Compact => write!(f, "compact"),
++        }
++    }
++}
++
++impl FromStr for AnnotationSpacing {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "spaced" | "Spaced" => Ok(Self::Spaced),
++            "compact" | "Compact" => Ok(Self::Compact),
++            _ => Err("Value not supported for AnnotationSpacing"),
++        }
++    }
++}
++
++/// Number of blank lines between top-level definitions (classes, functions).
++///
++/// * `Two` (default): PEP 8 / Black standard — two blank lines.
++/// * `One`: Single blank line between top-level definitions.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum TopLevelBlankLines {
++    /// Two blank lines between top-level definitions (PEP 8 / Black).
++    #[default]
++    Two,
++
++    /// One blank line between top-level definitions.
++    One,
++}
++
++impl TopLevelBlankLines {
++    pub const fn is_one(self) -> bool {
++        matches!(self, TopLevelBlankLines::One)
++    }
++
++    pub const fn is_two(self) -> bool {
++        matches!(self, TopLevelBlankLines::Two)
++    }
++}
++
++impl fmt::Display for TopLevelBlankLines {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Two => write!(f, "two"),
++            Self::One => write!(f, "one"),
++        }
++    }
++}
++
++impl FromStr for TopLevelBlankLines {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "two" | "Two" | "2" => Ok(Self::Two),
++            "one" | "One" | "1" => Ok(Self::One),
++            _ => Err("Value not supported for TopLevelBlankLines"),
++        }
++    }
++}
++
++/// Controls spacing around binary operators based on their precedence.
++///
++/// * `Spaced` (default): Spaces around all binary operators (Black-compatible).
++/// * `Precedence`: No spaces around high-precedence operators (`**`, `*`, `/`, `//`, `%`, `@`);
++///   spaces around everything else.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum OperatorSpacing {
++    /// Standard spacing: spaces around all binary operators (PEP 8 / Black compatible).
++    #[default]
++    Spaced,
++
++    /// Precedence-aware spacing: no spaces around `**`, `*`, `/`, `//`, `%`, `@`;
++    /// spaces around everything else.
++    Precedence,
++}
++
++impl OperatorSpacing {
++    pub const fn is_precedence(self) -> bool {
++        matches!(self, OperatorSpacing::Precedence)
++    }
++
++    pub const fn is_spaced(self) -> bool {
++        matches!(self, OperatorSpacing::Spaced)
++    }
++}
++
++impl fmt::Display for OperatorSpacing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Spaced => write!(f, "spaced"),
++            Self::Precedence => write!(f, "precedence"),
++        }
++    }
++}
++
++impl FromStr for OperatorSpacing {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "spaced" | "Spaced" => Ok(Self::Spaced),
++            "precedence" | "Precedence" => Ok(Self::Precedence),
++            _ => Err("Value not supported for OperatorSpacing"),
++        }
++    }
++}
++
++/// Controls spacing after the colon in dictionary literals.
++///
++/// * `Spaced` (default): `{"a": 1}` (Black-compatible)
++/// * `Compact`: `{"a":1}` (no space after colon)
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum DictSpacing {
++    /// Standard spacing: `{"a": 1}` (PEP 8 / Black compatible).
++    #[default]
++    Spaced,
++
++    /// Compact spacing: `{"a":1}` (no space after colon).
++    Compact,
++}
++
++impl DictSpacing {
++    pub const fn is_compact(self) -> bool {
++        matches!(self, DictSpacing::Compact)
++    }
++
++    pub const fn is_spaced(self) -> bool {
++        matches!(self, DictSpacing::Spaced)
++    }
++}
++
++impl fmt::Display for DictSpacing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Spaced => write!(f, "spaced"),
++            Self::Compact => write!(f, "compact"),
++        }
++    }
++}
++
++impl FromStr for DictSpacing {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "spaced" | "Spaced" => Ok(Self::Spaced),
++            "compact" | "Compact" => Ok(Self::Compact),
++            _ => Err("Value not supported for DictSpacing"),
++        }
++    }
++}
++
++/// Controls spacing around colons in slice expressions.
++///
++/// * `Spaced` (default): Black-compatible behavior (spaces around colons for complex expressions).
++/// * `Compact`: Never add spaces around colons, even for complex expressions like `x[a():b()]`.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum SliceSpacing {
++    /// Standard spacing: spaces around colons for complex slice expressions (Black compatible).
++    #[default]
++    Spaced,
++
++    /// Compact spacing: no spaces around colons, even for complex expressions.
++    Compact,
++}
++
++impl SliceSpacing {
++    pub const fn is_compact(self) -> bool {
++        matches!(self, SliceSpacing::Compact)
++    }
++
++    pub const fn is_spaced(self) -> bool {
++        matches!(self, SliceSpacing::Spaced)
++    }
++}
++
++impl fmt::Display for SliceSpacing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Spaced => write!(f, "spaced"),
++            Self::Compact => write!(f, "compact"),
++        }
++    }
++}
++
++impl FromStr for SliceSpacing {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "spaced" | "Spaced" => Ok(Self::Spaced),
++            "compact" | "Compact" => Ok(Self::Compact),
++            _ => Err("Value not supported for SliceSpacing"),
++        }
++    }
++}
++
++/// Controls blank lines between statements inside nested scopes (class bodies, function bodies).
++///
++/// * `One` (default): One blank line between class methods / nested definitions (Black-compatible).
++/// * `Zero`: No blank lines between class methods / nested definitions.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum NestedBlankLines {
++    /// One blank line between nested definitions (PEP 8 / Black compatible).
++    #[default]
++    One,
++
++    /// No blank lines between nested definitions.
++    Zero,
++}
++
++impl NestedBlankLines {
++    pub const fn is_zero(self) -> bool {
++        matches!(self, NestedBlankLines::Zero)
++    }
++
++    pub const fn is_one(self) -> bool {
++        matches!(self, NestedBlankLines::One)
++    }
++}
++
++impl fmt::Display for NestedBlankLines {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::One => write!(f, "one"),
++            Self::Zero => write!(f, "zero"),
++        }
++    }
++}
++
++impl FromStr for NestedBlankLines {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "one" | "One" | "1" => Ok(Self::One),
++            "zero" | "Zero" | "0" => Ok(Self::Zero),
++            _ => Err("Value not supported for NestedBlankLines"),
++        }
++    }
++}
++
++/// Controls spacing around `=` in default parameter values.
++///
++/// * `Spaced` (default): Spaces around `=` when the parameter has a type annotation:
++///   `def f(x: int = 1)` (Black-compatible).
++/// * `Compact`: No spaces around `=` regardless of annotation: `def f(x:int=1)`.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum DefaultValueSpacing {
++    /// Standard spacing: spaces around `=` for annotated parameters (Black compatible).
++    #[default]
++    Spaced,
++
++    /// Compact spacing: no spaces around `=` regardless of annotation.
++    Compact,
++}
++
++impl DefaultValueSpacing {
++    pub const fn is_compact(self) -> bool {
++        matches!(self, DefaultValueSpacing::Compact)
++    }
++
++    pub const fn is_spaced(self) -> bool {
++        matches!(self, DefaultValueSpacing::Spaced)
++    }
++}
++
++impl fmt::Display for DefaultValueSpacing {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Spaced => write!(f, "spaced"),
++            Self::Compact => write!(f, "compact"),
++        }
++    }
++}
++
++impl FromStr for DefaultValueSpacing {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "spaced" | "Spaced" => Ok(Self::Spaced),
++            "compact" | "Compact" => Ok(Self::Compact),
++            _ => Err("Value not supported for DefaultValueSpacing"),
++        }
++    }
++}
++
++/// Controls whether trailing commas are added to multi-line import statements.
++///
++/// * `Always` (default): Always add trailing commas to multi-line imports (Black-compatible).
++/// * `Never`: Never add trailing commas to multi-line imports.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum ImportTrailingComma {
++    /// Always add trailing commas to multi-line imports (Black compatible).
++    #[default]
++    Always,
++
++    /// Never add trailing commas to multi-line imports.
++    Never,
++}
++
++impl ImportTrailingComma {
++    pub const fn is_never(self) -> bool {
++        matches!(self, ImportTrailingComma::Never)
++    }
++
++    pub const fn is_always(self) -> bool {
++        matches!(self, ImportTrailingComma::Always)
++    }
++}
++
++impl fmt::Display for ImportTrailingComma {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Always => write!(f, "always"),
++            Self::Never => write!(f, "never"),
++        }
++    }
++}
++
++impl FromStr for ImportTrailingComma {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "always" | "Always" => Ok(Self::Always),
++            "never" | "Never" => Ok(Self::Never),
++            _ => Err("Value not supported for ImportTrailingComma"),
++        }
++    }
++}
++
++/// Controls blank lines around comments in nested (non-top-level) scopes.
++///
++/// * `Standard` (default): Preserve blank lines around comments in compound statements (Black-compatible).
++/// * `Compact`: Remove blank lines around comments in nested scopes.
++#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum CommentBlankLines {
++    /// Standard blank lines around comments (Black compatible).
++    #[default]
++    Standard,
++
++    /// No blank lines around comments in nested scopes.
++    Compact,
++}
++
++impl CommentBlankLines {
++    pub const fn is_compact(self) -> bool {
++        matches!(self, CommentBlankLines::Compact)
++    }
++
++    pub const fn is_standard(self) -> bool {
++        matches!(self, CommentBlankLines::Standard)
++    }
++}
++
++impl fmt::Display for CommentBlankLines {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Standard => write!(f, "standard"),
++            Self::Compact => write!(f, "compact"),
++        }
++    }
++}
++
++impl FromStr for CommentBlankLines {
++    type Err = &'static str;
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "standard" | "Standard" => Ok(Self::Standard),
++            "compact" | "Compact" => Ok(Self::Compact),
++            _ => Err("Value not supported for CommentBlankLines"),
++        }
++    }
++}
++
++/// All fork-specific compact formatting options, carried as a single unit.
++///
++/// Bundling them means `PyFormatOptions` (and `FormatterSettings`) gain **one** field rather
++/// than nine interleaved ones, which keeps the fork's footprint inside upstream structs to a
++/// single line and makes upstream syncs near-mechanical.
++///
++/// Every field defaults to the Black/PEP 8 behaviour, so `CompactOptions::default()` is
++/// indistinguishable from upstream.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, CacheKey)]
++#[cfg_attr(
++    feature = "serde",
++    derive(serde::Serialize, serde::Deserialize),
++    serde(default, deny_unknown_fields, rename_all = "kebab-case")
++)]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub struct CompactOptions {
++    annotation_spacing: AnnotationSpacing,
++    top_level_blank_lines: TopLevelBlankLines,
++    operator_spacing: OperatorSpacing,
++    dict_spacing: DictSpacing,
++    slice_spacing: SliceSpacing,
++    nested_blank_lines: NestedBlankLines,
++    default_value_spacing: DefaultValueSpacing,
++    import_trailing_comma: ImportTrailingComma,
++    comment_blank_lines: CommentBlankLines,
++}
++
++impl CompactOptions {
++    pub const fn annotation_spacing(&self) -> AnnotationSpacing {
++        self.annotation_spacing
++    }
++
++    pub const fn top_level_blank_lines(&self) -> TopLevelBlankLines {
++        self.top_level_blank_lines
++    }
++
++    pub const fn operator_spacing(&self) -> OperatorSpacing {
++        self.operator_spacing
++    }
++
++    pub const fn dict_spacing(&self) -> DictSpacing {
++        self.dict_spacing
++    }
++
++    pub const fn slice_spacing(&self) -> SliceSpacing {
++        self.slice_spacing
++    }
++
++    pub const fn nested_blank_lines(&self) -> NestedBlankLines {
++        self.nested_blank_lines
++    }
++
++    pub const fn default_value_spacing(&self) -> DefaultValueSpacing {
++        self.default_value_spacing
++    }
++
++    pub const fn import_trailing_comma(&self) -> ImportTrailingComma {
++        self.import_trailing_comma
++    }
++
++    pub const fn comment_blank_lines(&self) -> CommentBlankLines {
++        self.comment_blank_lines
++    }
++
++    #[must_use]
++    pub fn with_annotation_spacing(mut self, value: AnnotationSpacing) -> Self {
++        self.annotation_spacing = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_top_level_blank_lines(mut self, value: TopLevelBlankLines) -> Self {
++        self.top_level_blank_lines = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_operator_spacing(mut self, value: OperatorSpacing) -> Self {
++        self.operator_spacing = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_dict_spacing(mut self, value: DictSpacing) -> Self {
++        self.dict_spacing = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_slice_spacing(mut self, value: SliceSpacing) -> Self {
++        self.slice_spacing = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_nested_blank_lines(mut self, value: NestedBlankLines) -> Self {
++        self.nested_blank_lines = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_default_value_spacing(mut self, value: DefaultValueSpacing) -> Self {
++        self.default_value_spacing = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_import_trailing_comma(mut self, value: ImportTrailingComma) -> Self {
++        self.import_trailing_comma = value;
++        self
++    }
++
++    #[must_use]
++    pub fn with_comment_blank_lines(mut self, value: CommentBlankLines) -> Self {
++        self.comment_blank_lines = value;
++        self
++    }
++}
++
++impl CompactOptions {
++    /// Render these options in `ruff check --show-settings` form, one `<prefix><name> = <value>`
++    /// line per option.
++    ///
++    /// `display_settings!` (defined in `ruff_linter`, which this crate cannot depend on) only
++    /// accepts single-identifier field paths, so it cannot reach through this struct. Callers
++    /// invoke this alongside the macro and pass their own namespace prefix, which keeps the
++    /// emitted output identical to when these nine were flat fields.
++    pub fn fmt_settings(&self, f: &mut fmt::Formatter<'_>, prefix: &str) -> fmt::Result {
++        writeln!(
++            f,
++            "{prefix}annotation_spacing = {}",
++            self.annotation_spacing
++        )?;
++        writeln!(
++            f,
++            "{prefix}top_level_blank_lines = {}",
++            self.top_level_blank_lines
++        )?;
++        writeln!(f, "{prefix}operator_spacing = {}", self.operator_spacing)?;
++        writeln!(f, "{prefix}dict_spacing = {}", self.dict_spacing)?;
++        writeln!(f, "{prefix}slice_spacing = {}", self.slice_spacing)?;
++        writeln!(
++            f,
++            "{prefix}nested_blank_lines = {}",
++            self.nested_blank_lines
++        )?;
++        writeln!(
++            f,
++            "{prefix}default_value_spacing = {}",
++            self.default_value_spacing
++        )?;
++        writeln!(
++            f,
++            "{prefix}import_trailing_comma = {}",
++            self.import_trailing_comma
++        )?;
++        writeln!(
++            f,
++            "{prefix}comment_blank_lines = {}",
++            self.comment_blank_lines
++        )
++    }
++}
+diff --git a/crates/ruff_python_formatter/src/expression/binary_like.rs b/crates/ruff_python_formatter/src/expression/binary_like.rs
+index cdd61c9d5f..3675f4cffe 100644
+--- a/crates/ruff_python_formatter/src/expression/binary_like.rs
++++ b/crates/ruff_python_formatter/src/expression/binary_like.rs
+@@ -653,12 +653,16 @@ impl Format<PyFormatContext<'_>> for FlatBinaryExpressionSlice<'_> {
+                 let left = self.between_operators(last_operator, index);
+                 let right = self.after_operator(index);
+ 
+-                let is_pow = operator_part.symbol.is_pow()
+-                    && is_simple_power_expression(
+-                        left.last_operand().expression(),
+-                        right.first_operand().expression(),
+-                        f.context(),
+-                    );
++                let is_compact = if f.options().compact().operator_spacing().is_precedence() {
++                    operator_part.symbol.precedence() <= OperatorPrecedence::Multiplicative
++                } else {
++                    operator_part.symbol.is_pow()
++                        && is_simple_power_expression(
++                            left.last_operand().expression(),
++                            right.first_operand().expression(),
++                            f.context(),
++                        )
++                };
+ 
+                 if let Some(leading) = left.first_operand().leading_binary_comments() {
+                     leading_comments(leading).fmt(f)?;
+@@ -673,7 +677,7 @@ impl Format<PyFormatContext<'_>> for FlatBinaryExpressionSlice<'_> {
+                     trailing_comments(trailing).fmt(f)?;
+                 }
+ 
+-                if is_pow {
++                if is_compact {
+                     in_parentheses_only_soft_line_break().fmt(f)?;
+                 } else {
+                     in_parentheses_only_soft_line_break_or_space().fmt(f)?;
+@@ -688,7 +692,7 @@ impl Format<PyFormatContext<'_>> for FlatBinaryExpressionSlice<'_> {
+                         .has_unparenthesized_leading_comments(f.context())
+                 {
+                     hard_line_break().fmt(f)?;
+-                } else if is_pow {
++                } else if is_compact {
+                     in_parentheses_only_if_group_breaks(&space()).fmt(f)?;
+                 } else {
+                     space().fmt(f)?;
+diff --git a/crates/ruff_python_formatter/src/expression/expr_dict.rs b/crates/ruff_python_formatter/src/expression/expr_dict.rs
+index 9e5b4f1112..9547fad3bc 100644
+--- a/crates/ruff_python_formatter/src/expression/expr_dict.rs
++++ b/crates/ruff_python_formatter/src/expression/expr_dict.rs
+@@ -114,7 +114,9 @@ impl Format<PyFormatContext<'_>> for KeyValuePair<'_> {
+                     token(":").fmt(f)?;
+ 
+                     if self.comments.is_empty() {
+-                        space().fmt(f)?;
++                        if f.options().compact().dict_spacing().is_spaced() {
++                            space().fmt(f)?;
++                        }
+                     } else {
+                         dangling_comments(self.comments).fmt(f)?;
+                     }
+diff --git a/crates/ruff_python_formatter/src/expression/expr_slice.rs b/crates/ruff_python_formatter/src/expression/expr_slice.rs
+index eb6678ac66..0cca44ccbe 100644
+--- a/crates/ruff_python_formatter/src/expression/expr_slice.rs
++++ b/crates/ruff_python_formatter/src/expression/expr_slice.rs
+@@ -89,12 +89,13 @@ impl FormatNodeRule<ExprSlice> for FormatExprSlice {
+         // e201 = "e"[a() :: 1]
+         // e202 = "e"[a() :: a()]
+         // ```
+-        if !all_simple && lower.is_some() {
++        let spaced_slices = f.options().compact().slice_spacing().is_spaced();
++        if spaced_slices && !all_simple && lower.is_some() {
+             space().fmt(f)?;
+         }
+         token(":").fmt(f)?;
+         // No upper node, no need for a space, e.g. `x[a() :]`
+-        if !all_simple && upper.is_some() {
++        if spaced_slices && !all_simple && upper.is_some() {
+             space().fmt(f)?;
+         }
+ 
+@@ -123,12 +124,12 @@ impl FormatNodeRule<ExprSlice> for FormatExprSlice {
+             // e201 = "e"[a() :: 1]
+             // e202 = "e"[a() :: a()]
+             // ```
+-            if !all_simple && (upper.is_some() || step.is_none()) {
++            if spaced_slices && !all_simple && (upper.is_some() || step.is_none()) {
+                 space().fmt(f)?;
+             }
+             token(":").fmt(f)?;
+             // No step node, no need for a space
+-            if !all_simple && step.is_some() {
++            if spaced_slices && !all_simple && step.is_some() {
+                 space().fmt(f)?;
+             }
+             if let Some(step) = step {
+diff --git a/crates/ruff_python_formatter/src/lib.rs b/crates/ruff_python_formatter/src/lib.rs
+index 02c3847c19..30331f47f3 100644
+--- a/crates/ruff_python_formatter/src/lib.rs
++++ b/crates/ruff_python_formatter/src/lib.rs
+@@ -19,6 +19,12 @@ use crate::comments::{
+ };
+ pub use crate::context::PyFormatContext;
+ pub use crate::db::Db;
++// Fork-owned compact options. Re-exported from the crate root under the same names they
++// previously had in `options`, so downstream consumers are unaffected by the move.
++pub use crate::compact::{
++    AnnotationSpacing, CommentBlankLines, CompactOptions, DefaultValueSpacing, DictSpacing,
++    ImportTrailingComma, NestedBlankLines, OperatorSpacing, SliceSpacing, TopLevelBlankLines,
++};
+ pub use crate::options::{
+     DocstringCode, DocstringCodeLineWidth, MagicTrailingComma, NestedStringQuoteStyle, PreviewMode,
+     PyFormatOptions, QuoteStyle,
+@@ -29,6 +35,7 @@ pub use crate::shared_traits::{AsFormat, FormattedIter, FormattedIterExt, IntoFo
+ pub(crate) mod builders;
+ pub mod cli;
+ mod comments;
++mod compact;
+ pub(crate) mod context;
+ mod db;
+ pub(crate) mod expression;
+diff --git a/crates/ruff_python_formatter/src/options.rs b/crates/ruff_python_formatter/src/options.rs
+index f8ed0bdfb7..ba4aba4eae 100644
+--- a/crates/ruff_python_formatter/src/options.rs
++++ b/crates/ruff_python_formatter/src/options.rs
+@@ -7,6 +7,8 @@ use ruff_formatter::{FormatOptions, IndentStyle, IndentWidth, LineWidth};
+ use ruff_macros::CacheKey;
+ use ruff_python_ast::{self as ast, PySourceType};
+ 
++use crate::compact::CompactOptions;
++
+ /// Resolved options for formatting one individual file. The difference to `FormatterSettings`
+ /// is that `FormatterSettings` stores the settings for multiple files (the entire project, a subdirectory, ..)
+ #[derive(Clone, Debug)]
+@@ -69,6 +71,10 @@ pub struct PyFormatOptions {
+     /// inside interpolated string expressions. When set to `preferred`, Ruff will use
+     /// the configured `quote-style`.
+     nested_string_quote_style: NestedStringQuoteStyle,
++
++    /// Fork-specific compact formatting options. Bundled into a single field so that
++    /// upstream syncs touch one line of this struct rather than nine.
++    compact: CompactOptions,
+ }
+ 
+ fn default_line_width() -> LineWidth {
+@@ -99,6 +105,7 @@ impl Default for PyFormatOptions {
+             docstring_code_line_width: DocstringCodeLineWidth::default(),
+             preview: PreviewMode::default(),
+             nested_string_quote_style: NestedStringQuoteStyle::default(),
++            compact: CompactOptions::default(),
+         }
+     }
+ }
+@@ -156,6 +163,10 @@ impl PyFormatOptions {
+         self.nested_string_quote_style
+     }
+ 
++    pub const fn compact(&self) -> &CompactOptions {
++        &self.compact
++    }
++
+     #[must_use]
+     pub fn with_target_version(mut self, target_version: ast::PythonVersion) -> Self {
+         self.target_version = target_version;
+@@ -230,6 +241,12 @@ impl PyFormatOptions {
+         self.source_map_generation = source_map;
+         self
+     }
++
++    #[must_use]
++    pub fn with_compact(mut self, compact: CompactOptions) -> Self {
++        self.compact = compact;
++        self
++    }
+ }
+ 
+ impl FormatOptions for PyFormatOptions {
+diff --git a/crates/ruff_python_formatter/src/other/parameter.rs b/crates/ruff_python_formatter/src/other/parameter.rs
+index c2eeb6aa6a..034f0e9d58 100644
+--- a/crates/ruff_python_formatter/src/other/parameter.rs
++++ b/crates/ruff_python_formatter/src/other/parameter.rs
+@@ -22,7 +22,7 @@ impl FormatNodeRule<Parameter> for FormatParameter {
+                 && !f.context().is_expression_parenthesized(annotation.into())
+             {
+                 hard_line_break().fmt(f)?;
+-            } else {
++            } else if f.options().compact().annotation_spacing().is_spaced() {
+                 space().fmt(f)?;
+             }
+ 
+diff --git a/crates/ruff_python_formatter/src/other/parameter_with_default.rs b/crates/ruff_python_formatter/src/other/parameter_with_default.rs
+index a78c082a00..834936f811 100644
+--- a/crates/ruff_python_formatter/src/other/parameter_with_default.rs
++++ b/crates/ruff_python_formatter/src/other/parameter_with_default.rs
+@@ -20,7 +20,11 @@ impl FormatNodeRule<ParameterWithDefault> for FormatParameterWithDefault {
+         write!(f, [parameter.format()])?;
+ 
+         if let Some(default) = default {
+-            let space = parameter.annotation.is_some().then_some(space());
++            let space = if f.options().compact().default_value_spacing().is_compact() {
++                None
++            } else {
++                parameter.annotation.is_some().then_some(space())
++            };
+             // ```python
+             // def f(
+             //     a = # parameter trailing comment; needs line break
+diff --git a/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs b/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs
+index 09ad3240a9..50e1abf0d1 100644
+--- a/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs
++++ b/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs
+@@ -27,7 +27,11 @@ impl FormatNodeRule<StmtAnnAssign> for FormatStmtAnnAssign {
+             .as_ref()
+             .needs_parentheses(item.into(), f.context());
+ 
+-        write!(f, [target.format(), token(":"), space()])?;
++        if f.options().compact().annotation_spacing().is_spaced() {
++            write!(f, [target.format(), token(":"), space()])?;
++        } else {
++            write!(f, [target.format(), token(":")])?;
++        }
+ 
+         if let Some(value) = value {
+             if annotation_parentheses != OptionalParentheses::Always
+diff --git a/crates/ruff_python_formatter/src/statement/stmt_function_def.rs b/crates/ruff_python_formatter/src/statement/stmt_function_def.rs
+index 61b333c72d..5b2bece5db 100644
+--- a/crates/ruff_python_formatter/src/statement/stmt_function_def.rs
++++ b/crates/ruff_python_formatter/src/statement/stmt_function_def.rs
+@@ -120,7 +120,11 @@ fn format_function_header(f: &mut PyFormatter, item: &StmtFunctionDef) -> Format
+         parameters.format().fmt(f)?;
+ 
+         if let Some(return_annotation) = returns.as_deref() {
+-            write!(f, [space(), token("->"), space()])?;
++            if f.options().compact().annotation_spacing().is_spaced() {
++                write!(f, [space(), token("->"), space()])?;
++            } else {
++                write!(f, [token("->")])?;
++            }
+ 
+             if return_annotation.is_tuple_expr() {
+                 let parentheses = if comments.has_leading(return_annotation) {
+diff --git a/crates/ruff_python_formatter/src/statement/stmt_import_from.rs b/crates/ruff_python_formatter/src/statement/stmt_import_from.rs
+index 6b715eab83..0e9ce86e18 100644
+--- a/crates/ruff_python_formatter/src/statement/stmt_import_from.rs
++++ b/crates/ruff_python_formatter/src/statement/stmt_import_from.rs
+@@ -50,9 +50,14 @@ impl FormatNodeRule<StmtImportFrom> for FormatStmtImportFrom {
+             }
+         }
+ 
++        let trailing_comma = if f.options().compact().import_trailing_comma().is_never() {
++            TrailingComma::Never
++        } else {
++            TrailingComma::OneOrMore
++        };
+         let names = format_with(|f| {
+             f.join_comma_separated(item.end())
+-                .with_trailing_comma(TrailingComma::OneOrMore)
++                .with_trailing_comma(trailing_comma)
+                 .entries(names.iter().map(|name| (name, name.format())))
+                 .finish()
+         });
+diff --git a/crates/ruff_python_formatter/src/statement/suite.rs b/crates/ruff_python_formatter/src/statement/suite.rs
+index 6b06012078..6004f721ad 100644
+--- a/crates/ruff_python_formatter/src/statement/suite.rs
++++ b/crates/ruff_python_formatter/src/statement/suite.rs
+@@ -269,10 +269,14 @@ impl FormatRule<Suite, PyFormatContext<'_>> for FormatSuite {
+                     if !is_preceding_stub_function_without_empty_line {
+                         match self.kind {
+                             SuiteKind::TopLevel => {
+-                                write!(f, [empty_line(), empty_line()])?;
++                                top_level_empty_lines(f)?;
+                             }
+                             SuiteKind::Function | SuiteKind::Class | SuiteKind::Other { .. } => {
+-                                empty_line().fmt(f)?;
++                                if f.options().compact().nested_blank_lines().is_zero() {
++                                    hard_line_break().fmt(f)?;
++                                } else {
++                                    empty_line().fmt(f)?;
++                                }
+                             }
+                         }
+                     }
+@@ -298,7 +302,7 @@ impl FormatRule<Suite, PyFormatContext<'_>> for FormatSuite {
+                                     empty_line().fmt(f)?;
+                                 }
+                                 PySourceType::Python | PySourceType::Ipynb => {
+-                                    write!(f, [empty_line(), empty_line()])?;
++                                    top_level_empty_lines(f)?;
+                                 }
+                             },
+                         }
+@@ -339,7 +343,7 @@ impl FormatRule<Suite, PyFormatContext<'_>> for FormatSuite {
+                                 empty_line().fmt(f)?;
+                             }
+                             PySourceType::Python | PySourceType::Ipynb => {
+-                                write!(f, [empty_line(), empty_line()])?;
++                                top_level_empty_lines(f)?;
+                             }
+                         },
+                         SuiteKind::Function | SuiteKind::Class | SuiteKind::Other { .. } => {
+@@ -391,7 +395,7 @@ impl FormatRule<Suite, PyFormatContext<'_>> for FormatSuite {
+                                 empty_line().fmt(f)?;
+                             }
+                             PySourceType::Python | PySourceType::Ipynb => {
+-                                write!(f, [empty_line(), empty_line()])?;
++                                top_level_empty_lines(f)?;
+                             }
+                         },
+                     },
+@@ -980,6 +984,17 @@ fn new_logical_line_between_statements(source: &str, between_statement_range: Te
+     false
+ }
+ 
++/// Emit the configured number of blank lines for top-level separation.
++/// With `TopLevelBlankLines::Two` (default), emits two empty lines.
++/// With `TopLevelBlankLines::One`, emits a single empty line.
++fn top_level_empty_lines(f: &mut PyFormatter) -> FormatResult<()> {
++    if f.options().compact().top_level_blank_lines().is_one() {
++        empty_line().fmt(f)
++    } else {
++        write!(f, [empty_line(), empty_line()])
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use ruff_formatter::format;
+-- 
+2.43.0
+

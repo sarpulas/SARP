@@ -1,0 +1,5 @@
+items = data[1:10:2]
+result = matrix[get_start() : get_end()]
+chunk = buffer[offset() : limit() : step()]
+simple = seq[a:b]
+mixed = seq[compute(x) : 10]
