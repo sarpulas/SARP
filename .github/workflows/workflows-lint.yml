@@ -1,0 +1,34 @@
+# Lint the workflow files themselves.
+#
+# python-build.yml only runs on changes under python/, so until this existed a
+# change to the release or upstream-watch workflows was checked by nothing. That
+# matters most for the release path, which fires rarely and now also fires
+# unattended: a mistake there would first be discovered by a release failing to
+# build. actionlint catches the common ones statically — retired runner labels,
+# bad `needs` references, expressions using a context that job cannot see.
+name: workflows — lint
+
+on:
+  push:
+    paths: [".github/workflows/**"]
+  pull_request:
+    paths: [".github/workflows/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Installed from source at a pinned version rather than through a
+      # third-party action, so this workflow adds no dependency of its own.
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Lint
+        run: "$(go env GOPATH)/bin/actionlint"

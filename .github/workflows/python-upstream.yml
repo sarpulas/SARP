@@ -1,0 +1,205 @@
+# Follow upstream ruff releases: when astral-sh/ruff publishes one, re-pin to it,
+# prove the patches still hold against it, and cut a SARP release from it.
+#
+# The patches are the only thing this repository owns, so the interesting case is
+# the one where they no longer apply. That is a conflict for a human to resolve,
+# never something to paper over, so the verify job below is a hard gate: nothing
+# is tagged, pushed or published unless the patched tree builds, passes upstream's
+# own suites, regenerates cleanly and still reaches a formatting fixed point. When
+# it does not, the run opens an issue and stops.
+name: python — upstream watch
+
+on:
+  schedule:
+    # Daily. Upstream releases roughly weekly, so this picks one up within a day
+    # without spending runner time on a tighter poll.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: "Upstream version to pin instead of the latest release (e.g. 0.16.5)"
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  # One at a time: two overlapping runs would race on the pin commit.
+  group: python-upstream
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: detect upstream release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      current: ${{ steps.check.outputs.current }}
+      latest: ${{ steps.check.outputs.latest }}
+      needed: ${{ steps.check.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compare pin against upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCED: ${{ inputs.force_version }}
+        run: |
+          set -euo pipefail
+          current="$(tr -d '[:space:]' < python/UPSTREAM_VERSION)"
+
+          if [ -n "$FORCED" ]; then
+            latest="$FORCED"
+          else
+            # releases/latest excludes prereleases, which is what we want: a
+            # release candidate is not something to ship a SARP build from.
+            latest="$(gh api repos/astral-sh/ruff/releases/latest --jq .tag_name)"
+          fi
+          # Upstream tags are bare today (0.16.4) but were v-prefixed historically.
+          latest="${latest#v}"
+
+          if [ "$latest" = "$current" ]; then
+            needed=false
+            echo "pin is current at $current"
+          elif [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$latest" ]; then
+            needed=true
+            echo "upstream $latest is newer than pin $current"
+          else
+            # Guards against a yanked release or a hand-edited pin dragging us
+            # backwards to an older upstream.
+            needed=false
+            echo "upstream $latest is not newer than pin $current — ignoring"
+          fi
+
+          {
+            echo "current=$current"
+            echo "latest=$latest"
+            echo "needed=$needed"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: verify patches against ${{ needs.detect.outputs.latest }}
+    needs: detect
+    if: needs.detect.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python/build/ruff
+
+      - name: Re-pin to the new upstream release
+        env:
+          LATEST: ${{ needs.detect.outputs.latest }}
+        run: echo "$LATEST" > python/UPSTREAM_VERSION
+
+      # This is the gate. build.sh applies the patches with `git am --3way` and
+      # no fuzz, so a patch that upstream has invalidated fails here rather than
+      # silently dropping the option it carries.
+      - name: Apply patches and build
+        run: PROFILE=debug python/scripts/build.sh
+
+      - name: Upstream test suites
+        working-directory: python/build/ruff
+        run: |
+          cargo test -p ruff_linter --lib
+          cargo test -p ruff_python_formatter
+
+      - name: Generated files are reproducible
+        working-directory: python/build/ruff
+        run: |
+          git add -A
+          cargo dev generate-all
+          git diff --exit-code
+
+      - name: Convergence
+        run: |
+          python/scripts/check-convergence.sh python/build/ruff/target/debug/ruff | tee out.txt
+          grep -q "FIXED POINT reached" out.txt
+
+      # Only past every check above does anything become permanent.
+      - name: Commit the new pin and tag it
+        id: tag
+        env:
+          CURRENT: ${{ needs.detect.outputs.current }}
+          LATEST: ${{ needs.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # A new upstream version starts its SARP revision numbering again; a
+          # change to the patches against an unchanged upstream is what bumps the
+          # revision, and that is a deliberate, human-cut tag.
+          tag="python-v${LATEST}-SARP.1"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag $tag already exists — nothing to do"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add python/UPSTREAM_VERSION
+          git commit -m "Re-pin to upstream ruff ${LATEST}
+
+          Upstream released ${LATEST}. The patch series applies to it unchanged,
+          and against that tree ruff_linter and ruff_python_formatter pass, the
+          generated files regenerate to a fixed point, and format -> check --fix
+          -> format still converges on the corpus.
+
+          Previous pin: ${CURRENT}."
+          git push origin HEAD:main
+          git tag "$tag"
+          git push origin "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: release
+    needs: [detect, verify]
+    if: needs.verify.outputs.tag != ''
+    permissions:
+      contents: write
+    # Called rather than triggered: the tag above was pushed with GITHUB_TOKEN,
+    # and GitHub does not raise a push event for it.
+    uses: ./.github/workflows/python-release.yml
+    with:
+      tag: ${{ needs.verify.outputs.tag }}
+
+  report:
+    name: report failure
+    needs: [detect, verify]
+    if: failure() && needs.detect.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue for the stale patches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CURRENT: ${{ needs.detect.outputs.current }}
+          LATEST: ${{ needs.detect.outputs.latest }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Patches do not hold against upstream ruff ${LATEST}"
+          # The watch runs daily, so without this it would file the same issue
+          # every morning until someone fixes the patches.
+          if [ -n "$(gh issue list --repo "$REPO" --state open --search "$title in:title" --json number --jq '.[].number')" ]; then
+            echo "issue already open"
+            exit 0
+          fi
+          gh issue create --repo "$REPO" --title "$title" --body "Upstream published ${LATEST}; this repository is pinned to ${CURRENT}.
+
+          Re-pinning to ${LATEST} did not survive verification, so nothing was tagged, pushed or released. The pin on \`main\` is untouched and existing releases are unaffected.
+
+          The likely cause is that upstream moved code one of the two patches depends on, which \`git am --3way\` reports as a conflict. Failing run: ${RUN}
+
+          To resolve, follow \`python/docs/SYNCING.md\`: re-pin locally, apply the patches, fix the conflict, re-export the series, and confirm the corpus still reaches a fixed point. Once \`main\` carries a working series against ${LATEST}, this watch will pick it up on its next run."

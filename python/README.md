@@ -21,6 +21,10 @@ Download a binary from [Releases](../../releases). Archives contain a single `ru
 executable and a `.sha256` checksum, for linux (x86_64, aarch64), macOS (x86_64, aarch64) and
 Windows (x86_64).
 
+A release follows each upstream Ruff release automatically, tagged
+`python-v<upstream version>-SARP.<revision>`, and is published only once the patches have been
+shown to still hold against that upstream. See [`docs/SYNCING.md`](docs/SYNCING.md).
+
 ## Build from source
 
 ```sh

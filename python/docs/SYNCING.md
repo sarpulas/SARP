@@ -7,14 +7,35 @@ through, and nothing here is ever rewritten.
 
 ## Taking a new upstream release
 
+This happens on its own. `python-upstream.yml` asks `astral-sh/ruff` for its latest release
+every morning, and when that is newer than `UPSTREAM_VERSION` it re-pins, verifies, commits the
+pin, tags `python-v<version>-SARP.1` and publishes the binaries.
+
+Verification is a hard gate, not a report: nothing is committed, tagged or published unless the
+patched tree builds, passes upstream's `ruff_linter` and `ruff_python_formatter` suites,
+regenerates its derived files to a fixed point, and still converges on the corpus. When any of
+that fails the run stops and opens an issue, leaving the pin on `main` and every existing
+release untouched. Prereleases are ignored, and a version older than the current pin is ignored
+too, so a yanked release cannot drag the pin backwards.
+
+Two things it needs to work: `main` must accept a push from `github-actions[bot]`, and Actions
+must be allowed to create releases. A protected `main` will fail the push step and open an
+issue, which is at least a loud failure rather than a silent one.
+
+`workflow_dispatch` takes a `force_version` input for pinning to a specific version by hand —
+useful to skip a bad release or to test the path without waiting for the schedule.
+
+### When it opens an issue
+
+The patches no longer apply, which is the notification this repository exists to produce.
+Resolve it locally:
+
 ```sh
 echo 0.16.5 > UPSTREAM_VERSION
 scripts/build.sh
 ```
 
-If `git am` applies cleanly, that is the whole job. Commit the bumped version and tag.
-
-**If it fails**, upstream has changed something the patches depend on. That failure is the
+**When `git am` fails**, upstream has changed something the patches depend on. That failure is the
 point of this repo — a precise notification arriving the moment it becomes true, rather than a
 surprise months later. Resolve it:
 
@@ -93,10 +114,20 @@ which is unreviewable and conflicts on every upstream change.
 
 ## Releasing
 
+Normally you do not. A new upstream release produces `python-v<upstream>-SARP.1` and its five
+platform binaries without anyone doing anything.
+
+Cut one by hand when the patches change against an unchanged upstream — that is what the
+revision after `SARP.` counts:
+
 ```sh
-git tag python-v0.16.4-SARP.1
-git push origin python-v0.16.4-SARP.1
+git tag python-v0.16.4-SARP.2
+git push origin python-v0.16.4-SARP.2
 ```
+
+Creating the release through GitHub's web UI works too. That makes the tag and the release
+together, and the workflow attaches the archives to the release it finds rather than failing on
+one that already exists.
 
 The Cargo version is upstream's, untouched, so `ruff --version` reports the upstream release the
 build came from. Fork identity lives in the git tag.

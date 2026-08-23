@@ -18,6 +18,16 @@ on:
         description: "Tag to build and release"
         required: true
         type: string
+  # Called by python-upstream.yml. A tag pushed with GITHUB_TOKEN does not
+  # trigger the push event above — GitHub suppresses it to prevent workflows
+  # from re-triggering themselves — so the watcher invokes this workflow
+  # directly instead of relying on the tag it just pushed.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and release"
+        required: true
+        type: string
 
 permissions: {}
 
@@ -37,8 +47,8 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-gnu,  runner: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
-          - { target: x86_64-apple-darwin,       runner: macos-13 }
-          - { target: aarch64-apple-darwin,      runner: macos-14 }
+          - { target: x86_64-apple-darwin,       runner: macos-15-intel }
+          - { target: aarch64-apple-darwin,      runner: macos-15 }
           - { target: x86_64-pc-windows-msvc,    runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +126,15 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # A release may already exist for this tag: someone drafting one in the
+          # web UI creates the tag and the release together, and a re-run of this
+          # workflow finds its own earlier release. Attach the archives in that
+          # case rather than failing.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "release $TAG exists — uploading archives to it"
+            gh release upload "$TAG" --repo "$REPO" --clobber dist/*
+            exit 0
+          fi
           gh release create "$TAG" \
             --repo "$REPO" \
             --title "$TAG" \
