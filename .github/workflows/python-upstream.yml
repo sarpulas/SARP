@@ -53,26 +53,34 @@ jobs:
           current="$(tr -d '[:space:]' < python/UPSTREAM_VERSION)"
 
           if [ -n "$FORCED" ]; then
-            latest="$FORCED"
+            # An explicit version is an instruction, so it skips the checks
+            # below. Forcing is how you pin back to an older upstream when a
+            # release turns out to be bad, and how you exercise this workflow
+            # deliberately; a force that could only move forwards would do
+            # nothing the scheduled path does not already do.
+            latest="${FORCED#v}"
+            needed=true
+            echo "forced to $latest (pin is $current)"
           else
             # releases/latest excludes prereleases, which is what we want: a
             # release candidate is not something to ship a SARP build from.
             latest="$(gh api repos/astral-sh/ruff/releases/latest --jq .tag_name)"
-          fi
-          # Upstream tags are bare today (0.16.4) but were v-prefixed historically.
-          latest="${latest#v}"
+            # Upstream tags are bare today (0.16.4) but were v-prefixed historically.
+            latest="${latest#v}"
 
-          if [ "$latest" = "$current" ]; then
-            needed=false
-            echo "pin is current at $current"
-          elif [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$latest" ]; then
-            needed=true
-            echo "upstream $latest is newer than pin $current"
-          else
-            # Guards against a yanked release or a hand-edited pin dragging us
-            # backwards to an older upstream.
-            needed=false
-            echo "upstream $latest is not newer than pin $current — ignoring"
+            if [ "$latest" = "$current" ]; then
+              needed=false
+              echo "pin is current at $current"
+            elif [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$latest" ]; then
+              needed=true
+              echo "upstream $latest is newer than pin $current"
+            else
+              # Guards against a yanked release dragging the pin backwards on
+              # its own. Moving backwards deliberately is what force_version is
+              # for.
+              needed=false
+              echo "upstream $latest is not newer than pin $current — ignoring"
+            fi
           fi
 
           {
@@ -146,16 +154,24 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add python/UPSTREAM_VERSION
-          git commit -m "Re-pin to upstream ruff ${LATEST}
 
-          Upstream released ${LATEST}. The patch series applies to it unchanged,
-          and against that tree ruff_linter and ruff_python_formatter pass, the
-          generated files regenerate to a fixed point, and format -> check --fix
-          -> format still converges on the corpus.
+          # Forcing to the version already pinned leaves nothing to commit. That
+          # is a legitimate way to re-cut a release, so tag the existing commit
+          # rather than failing on an empty one.
+          if git diff --quiet -- python/UPSTREAM_VERSION; then
+            echo "pin is already ${LATEST} — tagging the current commit"
+          else
+            git add python/UPSTREAM_VERSION
+            git commit -m "Re-pin to upstream ruff ${LATEST}
+
+          The patch series applies to ${LATEST} unchanged, and against that tree
+          ruff_linter and ruff_python_formatter pass, the generated files
+          regenerate to a fixed point, and format -> check --fix -> format still
+          converges on the corpus.
 
           Previous pin: ${CURRENT}."
-          git push origin HEAD:main
+            git push origin HEAD:main
+          fi
           git tag "$tag"
           git push origin "$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
