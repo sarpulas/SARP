@@ -1,6 +1,13 @@
-# SARP Compact Formatting Options
+# SARP compact formatting options
 
-These nine options are added to Ruff by the patches in `../patches/`. They enable a denser, more compact code style while remaining fully configurable — each defaults to standard Black/PEP 8 behavior, so an unconfigured build formats exactly as upstream Ruff does.
+These nine options are added to Ruff by the patches in `../patches/`. Together they produce
+the SARP style described in the [repository README](../../README.md), which is the standard
+for new code.
+
+Each option defaults to standard Black/PEP 8 behavior, so an unconfigured build formats
+exactly as upstream Ruff does. That default exists so an existing codebase can adopt the
+tooling without a reformatting commit touching every file, and can then enable the style a
+directory at a time — it is a migration path, not a reason to stay on the old style.
 
 ## Configuration
 
@@ -55,6 +62,10 @@ config = {"host": "localhost", "port": 8080, "debug": True}
 ```python
 config = {"host":"localhost", "port":8080, "debug":True}
 ```
+
+Note: this applies to dict *literals*. A dict comprehension keeps its spacing —
+`{k: v for k, v in items}` is unchanged — because there the colon separates two expressions in
+a clause rather than joining a key to its value.
 
 ______________________________________________________________________
 
@@ -302,8 +313,8 @@ automatically — setting the `[format]` option is enough.
 
 | Option                              | Rules relaxed                                       |
 | ----------------------------------- | --------------------------------------------------- |
-| `annotation-spacing = "compact"`    | E225 (`->`), E231 (`:` in annotations)              |
-| `operator-spacing = "precedence"`   | E225 (`*`, `**`, `/`, `//`, `%`, `@`)               |
+| `annotation-spacing = "compact"`    | E225 (`->`), E231 (annotation colons, including variable and class-attribute annotations) |
+| `operator-spacing = "precedence"`   | E225/E226/E227/E228 (`*`, `**`, `/`, `//`, `%`, `@`) |
 | `dict-spacing = "compact"`          | E231 (`:` in dict literals)                         |
 | `default-value-spacing = "compact"` | E251                                                |
 | `import-trailing-comma = "never"`   | COM812, and isort's own emitter (I001)              |
@@ -319,11 +330,10 @@ default as of upstream 0.16.0, so without those adjustments the two would oscill
 
 ______________________________________________________________________
 
-## Recommended compact profile
+## The standard profile
 
-The options above are all opt-in and default to Black behaviour. This profile turns on the
-full compact style, and pairs it with the upstream rules that reduce code volume rather than
-just tightening layout:
+This is the configuration new code is held to. It turns on the full compact style, and pairs
+it with the upstream rules that reduce code volume rather than just tightening layout:
 
 ```toml
 [format]

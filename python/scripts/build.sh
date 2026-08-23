@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build ruff with the sarp compact patches applied.
+# Build ruff with the SARP compact patches applied.
 #
 # Clones upstream at the pinned tag, applies patches/, and builds. Nothing here is
 # vendored — the upstream tree is fetched fresh each time, so this repo only ever

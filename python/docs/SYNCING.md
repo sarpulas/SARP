@@ -94,8 +94,8 @@ which is unreviewable and conflicts on every upstream change.
 ## Releasing
 
 ```sh
-git tag python-v0.16.4-sarp.1
-git push origin python-v0.16.4-sarp.1
+git tag python-v0.16.4-SARP.1
+git push origin python-v0.16.4-SARP.1
 ```
 
 The Cargo version is upstream's, untouched, so `ruff --version` reports the upstream release the

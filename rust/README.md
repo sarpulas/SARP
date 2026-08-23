@@ -1,4 +1,4 @@
-# sarp/rust
+# SARP/rust
 
 rustfmt configuration.
 

@@ -1,4 +1,4 @@
-# sarp/python — compact Ruff
+# SARP/python — compact Ruff
 
 Nine formatting options for [Ruff](https://github.com/astral-sh/ruff) that produce a denser
 Python style, plus the linter adjustments that stop `ruff format` and `ruff check --fix`

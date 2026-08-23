@@ -45,9 +45,17 @@ jobs:
           cargo test -p ruff_linter --lib
           cargo test -p ruff_python_formatter
 
-      - name: Generated files are in sync
+      - name: Generated files are reproducible
         working-directory: python/build/ruff
         run: |
+          # build.sh has already run generate-all, so the tree differs from
+          # upstream's committed files by exactly the options the patches add.
+          # That difference is the point, and asserting a clean tree here would
+          # fail on every build. What is worth asserting is that generation has
+          # converged: stage the current state, regenerate, and require the
+          # second run to be a no-op. If it is, the derived files are fully
+          # reproducible from the patches and never need carrying in the series.
+          git add -A
           cargo dev generate-all
           git diff --exit-code
 

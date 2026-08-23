@@ -1,7 +1,7 @@
 From 23bde56643c9cc88b247ef62f1cbc217d6654f2c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 23 Aug 2026 09:52:34 +0000
-Subject: [PATCH 2/2] sarp: linter compatibility for the compact options
+Subject: [PATCH 2/2] SARP: linter compatibility for the compact options
 
 Without this, `ruff format` and `ruff check --fix` fight each other: the
 formatter emits compact output and pycodestyle, flake8-commas and isort
