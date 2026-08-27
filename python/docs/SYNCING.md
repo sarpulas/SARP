@@ -44,7 +44,7 @@ cd build/ruff                      # the scratch clone, already at the new tag
 git status                         # git am leaves the conflict staged
 # ...fix the conflict...
 git add -A && git am --continue
-git format-patch -o ../../patches 0.16.5..HEAD    # regenerate the series
+git format-patch --base=0.16.5 -o ../../patches 0.16.5..HEAD   # regenerate the series
 ```
 
 Then re-run `scripts/build.sh` from a clean state to confirm, and commit the regenerated
@@ -53,6 +53,13 @@ more useful record than a merge commit.
 
 Never pass `--skip` or increase fuzz to get past a failure. A patch that no longer applies
 means the option it carries is missing from the build, and skipping it ships that silently.
+
+Always pass `--base`. It records the upstream commit the series was generated against as a
+`base-commit:` trailer, and `scripts/build.sh` fetches that commit so `git am --3way` has the
+blobs it needs to merge. Without it the shallow clone cannot construct the merge base, and a
+conflict is reported as `sha1 information is lacking or useless / could not build fake
+ancestor` — a message that names no conflicting file and hides how much would have merged on
+its own.
 
 ## The acceptance gate
 

@@ -28,7 +28,9 @@ jobs:
       # Installed from source at a pinned version rather than through a
       # third-party action, so this workflow adds no dependency of its own.
       - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Lint
-        run: "$(go env GOPATH)/bin/actionlint"
+        run: actionlint

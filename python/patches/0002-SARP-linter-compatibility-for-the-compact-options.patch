@@ -1,4 +1,4 @@
-From 23bde56643c9cc88b247ef62f1cbc217d6654f2c Mon Sep 17 00:00:00 2001
+From 439bc601c762c1cfdb1a6e495132dcd50b1628fd Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 23 Aug 2026 09:52:34 +0000
 Subject: [PATCH 2/2] SARP: linter compatibility for the compact options
@@ -51,7 +51,7 @@ lambdas all still report.
  create mode 100644 crates/ruff_workspace/src/compact.rs
 
 diff --git a/crates/ruff_linter/src/checkers/logical_lines.rs b/crates/ruff_linter/src/checkers/logical_lines.rs
-index a3f8649e8f..b0719e43ad 100644
+index a3f8649..b0719e4 100644
 --- a/crates/ruff_linter/src/checkers/logical_lines.rs
 +++ b/crates/ruff_linter/src/checkers/logical_lines.rs
 @@ -106,15 +106,15 @@ pub(crate) fn check_logical_lines(
@@ -74,7 +74,7 @@ index a3f8649e8f..b0719e43ad 100644
          }
  
 diff --git a/crates/ruff_linter/src/checkers/tokens.rs b/crates/ruff_linter/src/checkers/tokens.rs
-index e0c613b83a..554e870569 100644
+index e0c613b..554e870 100644
 --- a/crates/ruff_linter/src/checkers/tokens.rs
 +++ b/crates/ruff_linter/src/checkers/tokens.rs
 @@ -150,7 +150,13 @@ pub(crate) fn check_tokens(
@@ -93,18 +93,18 @@ index e0c613b83a..554e870569 100644
  
      if context.is_rule_enabled(Rule::ExtraneousParentheses) {
 diff --git a/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs b/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs
-index be1b97bc58..6553056253 100644
+index 70f68e9..68fa689 100644
 --- a/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs
 +++ b/crates/ruff_linter/src/rules/flake8_commas/rules/trailing_commas.rs
-@@ -5,6 +5,7 @@ use ruff_text_size::{Ranged, TextRange};
- 
+@@ -6,6 +6,7 @@ use ruff_text_size::{Ranged, TextRange};
  use crate::Locator;
  use crate::checkers::ast::LintContext;
+ use crate::codes::Category;
 +use crate::settings::LinterSettings;
  use crate::{AlwaysFixableViolation, Violation};
  use crate::{Edit, Fix};
  
-@@ -26,6 +27,7 @@ enum TokenType {
+@@ -27,6 +28,7 @@ enum TokenType {
      Lambda,
      Class,
      Type,
@@ -112,7 +112,7 @@ index be1b97bc58..6553056253 100644
      Irrelevant,
  }
  
-@@ -75,8 +77,7 @@ impl From<(TokenKind, TextRange)> for SimpleToken {
+@@ -76,8 +78,7 @@ impl From<(TokenKind, TextRange)> for SimpleToken {
              TokenKind::Type => TokenType::Type,
              TokenKind::For => TokenType::For,
              TokenKind::Lambda => TokenType::Lambda,
@@ -122,7 +122,7 @@ index be1b97bc58..6553056253 100644
              _ => TokenType::Irrelevant,
          };
          #[expect(clippy::inconsistent_struct_constructor)]
-@@ -92,6 +93,8 @@ enum ContextType {
+@@ -93,6 +94,8 @@ enum ContextType {
      FunctionParameters,
      /// Call argument-like item list, e.g. `f(1,2,3)`, `foo()(1,2,3)`.
      CallArguments,
@@ -131,7 +131,7 @@ index be1b97bc58..6553056253 100644
      /// Tuple-like item list, e.g. `(1,2,3)`.
      Tuple,
      /// Subscript item list, e.g. `x[1,2,3]`, `foo()[1,2,3]`.
-@@ -255,6 +258,7 @@ pub(crate) fn trailing_commas(
+@@ -256,6 +259,7 @@ pub(crate) fn trailing_commas(
      tokens: &Tokens,
      locator: &Locator,
      indexer: &Indexer,
@@ -139,7 +139,7 @@ index be1b97bc58..6553056253 100644
  ) {
      let mut interpolated_strings = 0u32;
      let simple_tokens = tokens.iter().filter_map(|token| {
-@@ -304,7 +308,15 @@ pub(crate) fn trailing_commas(
+@@ -305,7 +309,15 @@ pub(crate) fn trailing_commas(
          // Update the comma context stack.
          let context = update_context(token, prev, prev_prev, &mut stack);
  
@@ -156,7 +156,7 @@ index be1b97bc58..6553056253 100644
  
          // Pop the current context if the current token ended it.
          // The top context is never popped (if unbalanced closing brackets).
-@@ -331,6 +343,7 @@ fn check_token(
+@@ -332,6 +344,7 @@ fn check_token(
      context: Context,
      locator: &Locator,
      lint_context: &LintContext,
@@ -164,7 +164,7 @@ index be1b97bc58..6553056253 100644
  ) {
      // Is it allowed to have a trailing comma before this token?
      let comma_allowed = token.ty == TokenType::ClosingBracket
-@@ -338,6 +351,7 @@ fn check_token(
+@@ -339,6 +352,7 @@ fn check_token(
              ContextType::No => false,
              ContextType::FunctionParameters => true,
              ContextType::CallArguments => true,
@@ -172,7 +172,7 @@ index be1b97bc58..6553056253 100644
              ContextType::TypeParameters => true,
              // `(1)` is not equivalent to `(1,)`.
              ContextType::Tuple => context.num_commas != 0,
-@@ -398,7 +412,11 @@ fn check_token(
+@@ -399,7 +413,11 @@ fn check_token(
                  | TokenType::OpeningSquareBracket
                  | TokenType::OpeningCurlyBracket
          );
@@ -185,7 +185,7 @@ index be1b97bc58..6553056253 100644
          if let Some(mut diagnostic) = lint_context
              .report_diagnostic_if_enabled(MissingTrailingComma, TextRange::empty(prev_prev.end()))
          {
-@@ -424,6 +442,7 @@ fn update_context(
+@@ -425,6 +443,7 @@ fn update_context(
      let new_context = match token.ty {
          TokenType::OpeningBracket => match (prev.ty, prev_prev.ty) {
              (TokenType::Named, TokenType::Def) => Context::new(ContextType::FunctionParameters),
@@ -194,7 +194,7 @@ index be1b97bc58..6553056253 100644
                  Context::new(ContextType::CallArguments)
              }
 diff --git a/crates/ruff_linter/src/rules/isort/format.rs b/crates/ruff_linter/src/rules/isort/format.rs
-index 8cd811091c..b79b274226 100644
+index 8cd8110..b79b274 100644
 --- a/crates/ruff_linter/src/rules/isort/format.rs
 +++ b/crates/ruff_linter/src/rules/isort/format.rs
 @@ -44,6 +44,11 @@ pub(crate) fn format_import(
@@ -266,7 +266,7 @@ index 8cd811091c..b79b274226 100644
          for comment in &comments.inline {
              output.push(' ');
 diff --git a/crates/ruff_linter/src/rules/isort/mod.rs b/crates/ruff_linter/src/rules/isort/mod.rs
-index 40241ba98b..e6fe0371e3 100644
+index 40241ba..e6fe037 100644
 --- a/crates/ruff_linter/src/rules/isort/mod.rs
 +++ b/crates/ruff_linter/src/rules/isort/mod.rs
 @@ -289,6 +289,7 @@ fn format_import_block(
@@ -278,7 +278,7 @@ index 40241ba98b..e6fe0371e3 100644
  
                      if settings.from_first {
 diff --git a/crates/ruff_linter/src/rules/isort/settings.rs b/crates/ruff_linter/src/rules/isort/settings.rs
-index b3ce23653f..4ec4f0a689 100644
+index b3ce236..4ec4f0a 100644
 --- a/crates/ruff_linter/src/rules/isort/settings.rs
 +++ b/crates/ruff_linter/src/rules/isort/settings.rs
 @@ -70,6 +70,9 @@ pub struct Settings {
@@ -311,7 +311,7 @@ index b3ce23653f..4ec4f0a689 100644
          Ok(())
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/compact.rs b/crates/ruff_linter/src/rules/pycodestyle/compact.rs
 new file mode 100644
-index 0000000000..eb1523439f
+index 0000000..eb15234
 --- /dev/null
 +++ b/crates/ruff_linter/src/rules/pycodestyle/compact.rs
 @@ -0,0 +1,140 @@
@@ -456,7 +456,7 @@ index 0000000000..eb1523439f
 +    }
 +}
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/mod.rs b/crates/ruff_linter/src/rules/pycodestyle/mod.rs
-index fcbd0345fd..95db05b47e 100644
+index 785eca6..68e6ee6 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/mod.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/mod.rs
 @@ -1,4 +1,5 @@
@@ -466,10 +466,10 @@ index fcbd0345fd..95db05b47e 100644
  pub mod settings;
  
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
-index 32795e95d5..b0705170a9 100644
+index 937a6de..b1839a6 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/rules/blank_lines.rs
-@@ -23,9 +23,7 @@ use crate::line_width::IndentWidth;
+@@ -24,9 +24,7 @@ use crate::line_width::IndentWidth;
  use crate::rules::pycodestyle::helpers::is_non_logical_token;
  use crate::{AlwaysFixableViolation, Edit, Fix, Locator, Violation};
  
@@ -480,7 +480,7 @@ index 32795e95d5..b0705170a9 100644
  const BLANK_LINES_NESTED_LEVEL: u32 = 1;
  
  /// ## What it does
-@@ -699,6 +697,8 @@ pub(crate) struct BlankLinesChecker<'a, 'b> {
+@@ -700,6 +698,8 @@ pub(crate) struct BlankLinesChecker<'a, 'b> {
      source_type: PySourceType,
      cell_offsets: Option<&'a CellOffsets>,
      context: &'a LintContext<'b>,
@@ -489,7 +489,7 @@ index 32795e95d5..b0705170a9 100644
  }
  
  impl<'a, 'b> BlankLinesChecker<'a, 'b> {
-@@ -709,12 +709,15 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -710,12 +710,15 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
          cell_offsets: Option<&'a CellOffsets>,
          context: &'a LintContext<'b>,
      ) -> BlankLinesChecker<'a, 'b> {
@@ -505,7 +505,7 @@ index 32795e95d5..b0705170a9 100644
          }
      }
  
-@@ -836,7 +839,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -837,7 +840,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
          state: &BlankLinesState,
          prev_indent_length: Option<usize>,
      ) {
@@ -514,7 +514,7 @@ index 32795e95d5..b0705170a9 100644
              // Only applies to methods.
              && matches!(line.kind,  LogicalLineKind::Function | LogicalLineKind::Decorator)
              // Allow groups of one-liners.
-@@ -870,9 +873,9 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -871,9 +874,9 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
              1
          } else {
              if line.indent_length == 0 {
@@ -526,7 +526,7 @@ index 32795e95d5..b0705170a9 100644
              }
          };
  
-@@ -1015,7 +1018,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -1016,7 +1019,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
              }
          }
  
@@ -535,7 +535,7 @@ index 32795e95d5..b0705170a9 100644
              && state
                  .previous_unindented_line_kind
                  .is_some_and(LogicalLineKind::is_class_function_or_decorator)
-@@ -1038,13 +1041,14 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -1039,13 +1042,14 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
                      diagnostic.set_fix(Fix::safe_edit(Edit::range_replacement(
                          self.stylist
                              .line_ending()
@@ -552,7 +552,7 @@ index 32795e95d5..b0705170a9 100644
                          ),
                          self.locator.line_start(state.last_non_comment_line_end),
                      )));
-@@ -1052,7 +1056,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
+@@ -1053,7 +1057,7 @@ impl<'a, 'b> BlankLinesChecker<'a, 'b> {
              }
          }
  
@@ -562,13 +562,13 @@ index 32795e95d5..b0705170a9 100644
              && matches!(state.fn_status, Status::Inside(_))
              && line.kind.is_class_function_or_decorator()
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs
-index 999dc2f637..0b8e6d74fd 100644
+index d4c5d23..88cfc2b 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace.rs
-@@ -4,9 +4,11 @@ use ruff_text_size::Ranged;
- 
+@@ -5,9 +5,11 @@ use ruff_text_size::Ranged;
  use crate::Edit;
  use crate::checkers::ast::LintContext;
+ use crate::codes::Category;
 +use crate::settings::LinterSettings;
  use crate::{AlwaysFixableViolation, Fix};
  
@@ -578,7 +578,7 @@ index 999dc2f637..0b8e6d74fd 100644
  
  /// ## What it does
  /// Checks for missing whitespace after `,`, `;`, and `:`.
-@@ -41,15 +43,45 @@ impl AlwaysFixableViolation for MissingWhitespace {
+@@ -42,15 +44,45 @@ impl AlwaysFixableViolation for MissingWhitespace {
  }
  
  /// E231
@@ -625,7 +625,7 @@ index 999dc2f637..0b8e6d74fd 100644
          match kind {
              TokenKind::FStringStart | TokenKind::TStringStart => interpolated_strings += 1,
              TokenKind::FStringEnd | TokenKind::TStringEnd => {
-@@ -102,6 +134,29 @@ pub(crate) fn missing_whitespace(line: &LogicalLine, context: &LintContext) {
+@@ -103,6 +135,29 @@ pub(crate) fn missing_whitespace(line: &LogicalLine, context: &LintContext) {
                              (TokenKind::Colon, TokenKind::Equal) => {
                                  continue; // Allow assignment expression
                              }
@@ -656,18 +656,18 @@ index 999dc2f637..0b8e6d74fd 100644
                          }
                      }
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs
-index db28627b28..2f831ea92d 100644
+index e1ae971..d293e0d 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/missing_whitespace_around_operator.rs
-@@ -5,6 +5,7 @@ use ruff_text_size::{Ranged, TextRange};
- use crate::checkers::ast::LintContext;
+@@ -6,6 +6,7 @@ use crate::checkers::ast::LintContext;
+ use crate::codes::Category;
  use crate::rules::pycodestyle::helpers::is_non_logical_token;
  use crate::rules::pycodestyle::rules::logical_lines::{DefinitionState, LogicalLine};
 +use crate::settings::LinterSettings;
  use crate::{AlwaysFixableViolation, Edit, Fix};
  
  /// ## What it does
-@@ -165,7 +166,11 @@ impl AlwaysFixableViolation for MissingWhitespaceAroundModuloOperator {
+@@ -166,7 +167,11 @@ impl AlwaysFixableViolation for MissingWhitespaceAroundModuloOperator {
  }
  
  /// E225, E226, E227, E228
@@ -680,7 +680,7 @@ index db28627b28..2f831ea92d 100644
      let mut definition_state = DefinitionState::from_tokens(line.tokens());
      let mut tokens = line.tokens().iter().peekable();
      let first_token = tokens
-@@ -214,7 +219,14 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
+@@ -215,7 +220,14 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
                  Some(TokenKind::Comma | TokenKind::Rpar | TokenKind::Colon)
              );
  
@@ -696,7 +696,7 @@ index db28627b28..2f831ea92d 100644
          } else if kind.is_unary_arithmetic_operator()
              || matches!(kind, TokenKind::Star | TokenKind::DoubleStar)
          {
-@@ -231,7 +243,9 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
+@@ -232,7 +244,9 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
              };
  
              if is_binary {
@@ -707,7 +707,7 @@ index db28627b28..2f831ea92d 100644
                      // Enforce consistent spacing, but don't enforce whitespaces.
                      NeedsSpace::Optional
                  } else {
-@@ -255,7 +269,7 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
+@@ -256,7 +270,7 @@ pub(crate) fn missing_whitespace_around_operator(line: &LogicalLine, context: &L
              // However, allow it in order to prevent entering an infinite loop in which E225 adds a
              // space only for E202 to remove it.
              NeedsSpace::No
@@ -716,7 +716,7 @@ index db28627b28..2f831ea92d 100644
              NeedsSpace::Yes
          } else {
              NeedsSpace::No
-@@ -356,7 +370,14 @@ fn diagnostic_kind_for_operator<'a>(
+@@ -357,7 +371,14 @@ fn diagnostic_kind_for_operator<'a>(
      }
  }
  
@@ -733,18 +733,18 @@ index db28627b28..2f831ea92d 100644
          kind,
          TokenKind::DoubleStarEqual
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs
-index 66c1c95dd3..4fc1c3dac6 100644
+index 4c4476f..719c29f 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/rules/logical_lines/whitespace_around_named_parameter_equals.rs
-@@ -4,6 +4,7 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
- 
+@@ -5,6 +5,7 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
  use crate::checkers::ast::LintContext;
+ use crate::codes::Category;
  use crate::rules::pycodestyle::rules::logical_lines::{DefinitionState, LogicalLine};
 +use crate::settings::LinterSettings;
  use crate::{AlwaysFixableViolation, Edit, Fix};
  
  /// ## What it does
-@@ -87,7 +88,11 @@ impl AlwaysFixableViolation for MissingWhitespaceAroundParameterEquals {
+@@ -88,7 +89,11 @@ impl AlwaysFixableViolation for MissingWhitespaceAroundParameterEquals {
  }
  
  /// E251, E252
@@ -757,7 +757,7 @@ index 66c1c95dd3..4fc1c3dac6 100644
      let mut parens = 0u32;
      let mut fstrings = 0u32;
      let mut annotated_func_arg = false;
-@@ -121,7 +126,11 @@ pub(crate) fn whitespace_around_named_parameter_equals(line: &LogicalLine, conte
+@@ -122,7 +127,11 @@ pub(crate) fn whitespace_around_named_parameter_equals(line: &LogicalLine, conte
              TokenKind::Equal
                  if definition_state.in_type_params() || (parens > 0 && fstrings == 0) =>
              {
@@ -771,7 +771,7 @@ index 66c1c95dd3..4fc1c3dac6 100644
                      if start == prev_end && prev_end != TextSize::new(0) {
                          if let Some(mut diagnostic) = context.report_diagnostic_if_enabled(
 diff --git a/crates/ruff_linter/src/rules/pycodestyle/settings.rs b/crates/ruff_linter/src/rules/pycodestyle/settings.rs
-index b034a77874..614a8d1f53 100644
+index b034a77..614a8d1 100644
 --- a/crates/ruff_linter/src/rules/pycodestyle/settings.rs
 +++ b/crates/ruff_linter/src/rules/pycodestyle/settings.rs
 @@ -5,12 +5,17 @@ use ruff_macros::CacheKey;
@@ -802,7 +802,7 @@ index b034a77874..614a8d1f53 100644
          Ok(())
 diff --git a/crates/ruff_workspace/src/compact.rs b/crates/ruff_workspace/src/compact.rs
 new file mode 100644
-index 0000000000..6a0adbc1a9
+index 0000000..6a0adbc
 --- /dev/null
 +++ b/crates/ruff_workspace/src/compact.rs
 @@ -0,0 +1,110 @@
@@ -917,10 +917,10 @@ index 0000000000..6a0adbc1a9
 +    }
 +}
 diff --git a/crates/ruff_workspace/src/configuration.rs b/crates/ruff_workspace/src/configuration.rs
-index 41b6525731..d6b6f1f307 100644
+index 9be5369..384fc6c 100644
 --- a/crates/ruff_workspace/src/configuration.rs
 +++ b/crates/ruff_workspace/src/configuration.rs
-@@ -42,7 +42,9 @@ use ruff_linter::{
+@@ -43,7 +43,9 @@ use ruff_linter::{
  };
  use ruff_python_ast as ast;
  use ruff_python_formatter::{
@@ -931,7 +931,7 @@ index 41b6525731..d6b6f1f307 100644
  };
  
  use crate::options::{
-@@ -222,6 +224,10 @@ impl Configuration {
+@@ -223,6 +225,10 @@ impl Configuration {
          let format = self.format;
          let format_defaults = FormatterSettings::default();
  
@@ -942,7 +942,7 @@ index 41b6525731..d6b6f1f307 100644
          let quote_style = format.quote_style.unwrap_or(format_defaults.quote_style);
          let format_preview = match format.preview.unwrap_or(global_preview) {
              PreviewMode::Disabled => ruff_python_formatter::PreviewMode::Disabled,
-@@ -264,6 +270,7 @@ impl Configuration {
+@@ -265,6 +271,7 @@ impl Configuration {
              docstring_code_line_width: format
                  .docstring_code_line_width
                  .unwrap_or(format_defaults.docstring_code_line_width),
@@ -950,7 +950,7 @@ index 41b6525731..d6b6f1f307 100644
          };
  
          let analyze = self.analyze;
-@@ -299,11 +306,13 @@ impl Configuration {
+@@ -300,11 +307,13 @@ impl Configuration {
          let rules = lint.as_rule_table(lint_preview)?;
  
          // LinterSettings validation
@@ -965,7 +965,7 @@ index 41b6525731..d6b6f1f307 100644
          let flake8_import_conventions = lint
              .flake8_import_conventions
              .map(|options| options.try_into_settings(lint_preview))
-@@ -480,13 +489,17 @@ impl Configuration {
+@@ -481,13 +490,17 @@ impl Configuration {
                      .map(Pep8NamingOptions::try_into_settings)
                      .transpose()?
                      .unwrap_or_default(),
@@ -990,7 +990,7 @@ index 41b6525731..d6b6f1f307 100644
                  },
                  pydoclint: lint
                      .pydoclint
-@@ -1331,6 +1344,15 @@ pub struct FormatConfiguration {
+@@ -1340,6 +1353,15 @@ pub struct FormatConfiguration {
      pub line_ending: Option<LineEnding>,
      pub docstring_code_format: Option<DocstringCode>,
      pub docstring_code_line_width: Option<DocstringCodeLineWidth>,
@@ -1006,7 +1006,7 @@ index 41b6525731..d6b6f1f307 100644
  }
  
  impl FormatConfiguration {
-@@ -1368,6 +1390,15 @@ impl FormatConfiguration {
+@@ -1377,6 +1399,15 @@ impl FormatConfiguration {
                  }
              }),
              docstring_code_line_width: options.docstring_code_line_length,
@@ -1022,7 +1022,7 @@ index 41b6525731..d6b6f1f307 100644
          })
      }
  
-@@ -1388,6 +1419,15 @@ impl FormatConfiguration {
+@@ -1397,6 +1428,15 @@ impl FormatConfiguration {
              docstring_code_line_width: self
                  .docstring_code_line_width
                  .or(config.docstring_code_line_width),
@@ -1039,7 +1039,7 @@ index 41b6525731..d6b6f1f307 100644
      }
  }
 diff --git a/crates/ruff_workspace/src/lib.rs b/crates/ruff_workspace/src/lib.rs
-index bc8505c346..0daea95b28 100644
+index bc8505c..0daea95 100644
 --- a/crates/ruff_workspace/src/lib.rs
 +++ b/crates/ruff_workspace/src/lib.rs
 @@ -1,3 +1,4 @@
@@ -1048,7 +1048,7 @@ index bc8505c346..0daea95b28 100644
  pub mod options;
  pub mod pyproject;
 diff --git a/crates/ruff_workspace/src/options.rs b/crates/ruff_workspace/src/options.rs
-index f28a960dad..0bf91f78ae 100644
+index a108f73..d0c23ce 100644
 --- a/crates/ruff_workspace/src/options.rs
 +++ b/crates/ruff_workspace/src/options.rs
 @@ -40,7 +40,11 @@ use ruff_linter::{UnresolvedRuleSelector, warn_user_once};
@@ -1064,7 +1064,7 @@ index f28a960dad..0bf91f78ae 100644
  use ruff_python_semantic::NameImports;
  use ruff_python_stdlib::identifiers::is_identifier;
  use ruff_ranged_value::ValueSourceGuard;
-@@ -3104,6 +3108,8 @@ impl IsortOptions {
+@@ -3110,6 +3114,8 @@ impl IsortOptions {
          }
  
          Ok(isort::settings::Settings {
@@ -1073,7 +1073,7 @@ index f28a960dad..0bf91f78ae 100644
              required_imports: self
                  .required_imports
                  .unwrap_or_default()
-@@ -3347,6 +3353,8 @@ impl PycodestyleOptions {
+@@ -3353,6 +3359,8 @@ impl PycodestyleOptions {
              max_doc_length: self.max_doc_length,
              max_line_length: self.max_line_length.unwrap_or(global_line_length),
              ignore_overlong_task_comments: self.ignore_overlong_task_comments.unwrap_or_default(),
@@ -1082,7 +1082,7 @@ index f28a960dad..0bf91f78ae 100644
          }
      }
  }
-@@ -4171,6 +4179,207 @@ pub struct FormatOptions {
+@@ -4177,6 +4185,207 @@ pub struct FormatOptions {
          "#
      )]
      pub docstring_code_line_length: Option<DocstringCodeLineWidth>,
@@ -1291,7 +1291,7 @@ index f28a960dad..0bf91f78ae 100644
  
  /// Configures Ruff's `analyze` command.
 diff --git a/crates/ruff_workspace/src/settings.rs b/crates/ruff_workspace/src/settings.rs
-index 8527e17aff..15148b24b8 100644
+index 8527e17..15148b2 100644
 --- a/crates/ruff_workspace/src/settings.rs
 +++ b/crates/ruff_workspace/src/settings.rs
 @@ -11,8 +11,8 @@ use ruff_linter::settings::types::{

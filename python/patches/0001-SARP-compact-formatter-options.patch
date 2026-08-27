@@ -1,4 +1,4 @@
-From 942be7c0429323d3e3f969ec8c23e40c63b413c7 Mon Sep 17 00:00:00 2001
+From c64460a720370f328e823e47216f87597456607f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Sun, 23 Aug 2026 09:52:34 +0000
 Subject: [PATCH 1/2] SARP: compact formatter options
@@ -41,7 +41,7 @@ each. Call sites read `f.options().compact().<option>()`.
  create mode 100644 crates/ruff_python_formatter/src/compact/mod.rs
 
 diff --git a/crates/ruff_python_formatter/src/builders.rs b/crates/ruff_python_formatter/src/builders.rs
-index 8d3f701e59..afddfb4145 100644
+index 8d3f701..afddfb4 100644
 --- a/crates/ruff_python_formatter/src/builders.rs
 +++ b/crates/ruff_python_formatter/src/builders.rs
 @@ -121,6 +121,8 @@ pub(crate) enum TrailingComma {
@@ -65,7 +65,7 @@ index 8d3f701e59..afddfb4145 100644
                      TextRange::new(last_end, self.sequence_end),
                      self.fmt.context(),
 diff --git a/crates/ruff_python_formatter/src/comments/format.rs b/crates/ruff_python_formatter/src/comments/format.rs
-index 2fa1e5e2e1..efbb57d763 100644
+index 2fa1e5e..efbb57d 100644
 --- a/crates/ruff_python_formatter/src/comments/format.rs
 +++ b/crates/ruff_python_formatter/src/comments/format.rs
 @@ -337,15 +337,25 @@ impl Format<PyFormatContext<'_>> for FormatEmptyLines {
@@ -142,7 +142,7 @@ index 2fa1e5e2e1..efbb57d763 100644
              };
  
 diff --git a/crates/ruff_python_formatter/src/comments/mod.rs b/crates/ruff_python_formatter/src/comments/mod.rs
-index c5f6a67a44..ebcc14dde8 100644
+index c5f6a67..ebcc14d 100644
 --- a/crates/ruff_python_formatter/src/comments/mod.rs
 +++ b/crates/ruff_python_formatter/src/comments/mod.rs
 @@ -489,13 +489,28 @@ struct CommentsData<'a> {
@@ -178,7 +178,7 @@ index c5f6a67a44..ebcc14dde8 100644
      use insta::assert_debug_snapshot;
 diff --git a/crates/ruff_python_formatter/src/compact/mod.rs b/crates/ruff_python_formatter/src/compact/mod.rs
 new file mode 100644
-index 0000000000..ca44951c58
+index 0000000..ca44951
 --- /dev/null
 +++ b/crates/ruff_python_formatter/src/compact/mod.rs
 @@ -0,0 +1,641 @@
@@ -824,7 +824,7 @@ index 0000000000..ca44951c58
 +    }
 +}
 diff --git a/crates/ruff_python_formatter/src/expression/binary_like.rs b/crates/ruff_python_formatter/src/expression/binary_like.rs
-index cdd61c9d5f..3675f4cffe 100644
+index cdd61c9..3675f4c 100644
 --- a/crates/ruff_python_formatter/src/expression/binary_like.rs
 +++ b/crates/ruff_python_formatter/src/expression/binary_like.rs
 @@ -653,12 +653,16 @@ impl Format<PyFormatContext<'_>> for FlatBinaryExpressionSlice<'_> {
@@ -869,7 +869,7 @@ index cdd61c9d5f..3675f4cffe 100644
                  } else {
                      space().fmt(f)?;
 diff --git a/crates/ruff_python_formatter/src/expression/expr_dict.rs b/crates/ruff_python_formatter/src/expression/expr_dict.rs
-index 9e5b4f1112..9547fad3bc 100644
+index 9e5b4f1..9547fad 100644
 --- a/crates/ruff_python_formatter/src/expression/expr_dict.rs
 +++ b/crates/ruff_python_formatter/src/expression/expr_dict.rs
 @@ -114,7 +114,9 @@ impl Format<PyFormatContext<'_>> for KeyValuePair<'_> {
@@ -884,7 +884,7 @@ index 9e5b4f1112..9547fad3bc 100644
                          dangling_comments(self.comments).fmt(f)?;
                      }
 diff --git a/crates/ruff_python_formatter/src/expression/expr_slice.rs b/crates/ruff_python_formatter/src/expression/expr_slice.rs
-index eb6678ac66..0cca44ccbe 100644
+index eb6678a..0cca44c 100644
 --- a/crates/ruff_python_formatter/src/expression/expr_slice.rs
 +++ b/crates/ruff_python_formatter/src/expression/expr_slice.rs
 @@ -89,12 +89,13 @@ impl FormatNodeRule<ExprSlice> for FormatExprSlice {
@@ -919,7 +919,7 @@ index eb6678ac66..0cca44ccbe 100644
              }
              if let Some(step) = step {
 diff --git a/crates/ruff_python_formatter/src/lib.rs b/crates/ruff_python_formatter/src/lib.rs
-index 02c3847c19..30331f47f3 100644
+index 02c3847..30331f4 100644
 --- a/crates/ruff_python_formatter/src/lib.rs
 +++ b/crates/ruff_python_formatter/src/lib.rs
 @@ -19,6 +19,12 @@ use crate::comments::{
@@ -944,7 +944,7 @@ index 02c3847c19..30331f47f3 100644
  mod db;
  pub(crate) mod expression;
 diff --git a/crates/ruff_python_formatter/src/options.rs b/crates/ruff_python_formatter/src/options.rs
-index f8ed0bdfb7..ba4aba4eae 100644
+index f8ed0bd..ba4aba4 100644
 --- a/crates/ruff_python_formatter/src/options.rs
 +++ b/crates/ruff_python_formatter/src/options.rs
 @@ -7,6 +7,8 @@ use ruff_formatter::{FormatOptions, IndentStyle, IndentWidth, LineWidth};
@@ -1000,7 +1000,7 @@ index f8ed0bdfb7..ba4aba4eae 100644
  
  impl FormatOptions for PyFormatOptions {
 diff --git a/crates/ruff_python_formatter/src/other/parameter.rs b/crates/ruff_python_formatter/src/other/parameter.rs
-index c2eeb6aa6a..034f0e9d58 100644
+index c2eeb6a..034f0e9 100644
 --- a/crates/ruff_python_formatter/src/other/parameter.rs
 +++ b/crates/ruff_python_formatter/src/other/parameter.rs
 @@ -22,7 +22,7 @@ impl FormatNodeRule<Parameter> for FormatParameter {
@@ -1013,7 +1013,7 @@ index c2eeb6aa6a..034f0e9d58 100644
              }
  
 diff --git a/crates/ruff_python_formatter/src/other/parameter_with_default.rs b/crates/ruff_python_formatter/src/other/parameter_with_default.rs
-index a78c082a00..834936f811 100644
+index a78c082..834936f 100644
 --- a/crates/ruff_python_formatter/src/other/parameter_with_default.rs
 +++ b/crates/ruff_python_formatter/src/other/parameter_with_default.rs
 @@ -20,7 +20,11 @@ impl FormatNodeRule<ParameterWithDefault> for FormatParameterWithDefault {
@@ -1030,7 +1030,7 @@ index a78c082a00..834936f811 100644
              // def f(
              //     a = # parameter trailing comment; needs line break
 diff --git a/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs b/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs
-index 09ad3240a9..50e1abf0d1 100644
+index 09ad324..50e1abf 100644
 --- a/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs
 +++ b/crates/ruff_python_formatter/src/statement/stmt_ann_assign.rs
 @@ -27,7 +27,11 @@ impl FormatNodeRule<StmtAnnAssign> for FormatStmtAnnAssign {
@@ -1047,7 +1047,7 @@ index 09ad3240a9..50e1abf0d1 100644
          if let Some(value) = value {
              if annotation_parentheses != OptionalParentheses::Always
 diff --git a/crates/ruff_python_formatter/src/statement/stmt_function_def.rs b/crates/ruff_python_formatter/src/statement/stmt_function_def.rs
-index 61b333c72d..5b2bece5db 100644
+index 61b333c..5b2bece 100644
 --- a/crates/ruff_python_formatter/src/statement/stmt_function_def.rs
 +++ b/crates/ruff_python_formatter/src/statement/stmt_function_def.rs
 @@ -120,7 +120,11 @@ fn format_function_header(f: &mut PyFormatter, item: &StmtFunctionDef) -> Format
@@ -1064,7 +1064,7 @@ index 61b333c72d..5b2bece5db 100644
              if return_annotation.is_tuple_expr() {
                  let parentheses = if comments.has_leading(return_annotation) {
 diff --git a/crates/ruff_python_formatter/src/statement/stmt_import_from.rs b/crates/ruff_python_formatter/src/statement/stmt_import_from.rs
-index 6b715eab83..0e9ce86e18 100644
+index 6b715ea..0e9ce86 100644
 --- a/crates/ruff_python_formatter/src/statement/stmt_import_from.rs
 +++ b/crates/ruff_python_formatter/src/statement/stmt_import_from.rs
 @@ -50,9 +50,14 @@ impl FormatNodeRule<StmtImportFrom> for FormatStmtImportFrom {
@@ -1084,7 +1084,7 @@ index 6b715eab83..0e9ce86e18 100644
                  .finish()
          });
 diff --git a/crates/ruff_python_formatter/src/statement/suite.rs b/crates/ruff_python_formatter/src/statement/suite.rs
-index 6b06012078..6004f721ad 100644
+index 6b06012..6004f72 100644
 --- a/crates/ruff_python_formatter/src/statement/suite.rs
 +++ b/crates/ruff_python_formatter/src/statement/suite.rs
 @@ -269,10 +269,14 @@ impl FormatRule<Suite, PyFormatContext<'_>> for FormatSuite {
@@ -1149,6 +1149,8 @@ index 6b06012078..6004f721ad 100644
  #[cfg(test)]
  mod tests {
      use ruff_formatter::format;
+
+base-commit: 9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a
 -- 
 2.43.0
 
